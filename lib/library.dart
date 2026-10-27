@@ -1,12 +1,16 @@
 // Library grid (one per Jellyfin library) and the show page with seasons and episodes.
 // Keyboard: arrows move, Enter opens, Escape goes back (or closes a picker).
 
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'main.dart' show Jellyfin;
-import 'player.dart';
+import 'native_player.dart' show playerScreen;
+import 'syncplay.dart' show startWatchTogether, watchTogetherButton;
+import 'images.dart';
 import 'ui.dart';
 
 // ---------- Sorting ----------
@@ -58,13 +62,30 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   final List<dynamic> _items = [];
   int _total = 0;
-  bool _loading = false;
   bool _firstLoad = true;
   int _generation = 0; // ignores answers from an older filter after the filters change
 
   List<String>? _genres;
   _Picker _picker = _Picker.none;
   final _pickerFirst = FocusNode();
+  // The Sort and Genre buttons, so focus goes back to the one that opened the picker.
+  final _sortChip = FocusNode();
+  final _genreChip = FocusNode();
+  final _unwatchedChip = FocusNode();
+  final _fourKChip = FocusNode();
+  FocusNode? _lastChip;
+
+  // Fixed jumps for the controller: tabs ↓ filter buttons ↓ grid, and Up from the top row
+  // of the grid goes back to the filter buttons (Flutter's guess skipped them from the left).
+  final _posterNodes = FocusNodeList('Library: Poster');
+  int _focusedIndex = 0;
+  Timer? _prefetchTimer;
+
+  bool _focusGrid() {
+    if (_items.isEmpty) return false;
+    final i = _focusedIndex < _items.length ? _focusedIndex : 0;
+    return focusOn(_posterNodes[i]) || _posterNodes.focusFirstVisible();
+  }
   final _grid = ScrollController();
   double _rowExtent = 400; // height of one grid row, measured at layout
 
@@ -78,6 +99,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void dispose() {
     _grid.dispose();
     _pickerFirst.dispose();
+    _sortChip.dispose();
+    _genreChip.dispose();
+    _unwatchedChip.dispose();
+    _fourKChip.dispose();
+    _posterNodes.dispose();
+    _prefetchTimer?.cancel();
     super.dispose();
   }
 
@@ -85,20 +112,36 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _reload() async {
     _generation++;
+    _inflight = null;
     setState(() {
       _items.clear();
       _total = 0;
       _firstLoad = true;
-      _loading = false;
+      _error = null;
     });
     if (_grid.hasClients) _grid.jumpTo(0);
+    _focusedIndex = 0;
     await _loadMore();
   }
 
-  Future<void> _loadMore() async {
-    if (_loading || (!_firstLoad && _items.length >= _total)) return;
-    final gen = _generation;
-    _loading = true;
+  // The page being fetched right now, if any. Asking for more while it loads waits for that
+  // same page instead of returning straight away (which made the A–Z rail loop forever).
+  Future<void>? _inflight;
+  String? _error;
+
+  Future<void> _loadMore() {
+    final running = _inflight;
+    if (running != null) return running;
+    if (_error != null || (!_firstLoad && _items.length >= _total)) return Future.value();
+    final page = _fetchPage(_generation);
+    _inflight = page;
+    page.whenComplete(() {
+      if (identical(_inflight, page)) _inflight = null;
+    });
+    return page;
+  }
+
+  Future<void> _fetchPage(int gen) async {
     try {
       final page = await jf.libraryPage(
         parentId: _libId,
@@ -116,10 +159,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _total = page.total;
         _firstLoad = false;
       });
-    } catch (_) {
-      if (mounted && gen == _generation) setState(() => _firstLoad = false);
-    } finally {
-      if (gen == _generation) _loading = false;
+    } catch (e) {
+      if (mounted && gen == _generation) {
+        setState(() {
+          _firstLoad = false;
+          _error = errorText(e);
+        });
+      }
     }
   }
 
@@ -144,7 +190,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
     }
     while (mounted && _items.length <= index && _items.length < _total) {
+      final before = _items.length;
       await _loadMore();
+      if (_items.length == before) break; // nothing new arrived (error or filters changed): stop
     }
     if (!mounted || !_grid.hasClients || !_grid.position.hasContentDimensions) return;
     final target = (index ~/ _cols) * (_rowExtent + _rowGap);
@@ -156,10 +204,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _open(int index) async {
     final item = _items[index];
     final Widget screen =
-        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : PlayerScreen(jf: jf, item: item);
+        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : playerScreen(jf, item);
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
     try {
-      final fresh = await jf.item(item['Id']);
+      final fresh = await jf.item(item['Id'], fresh: true);
       if (mounted && index < _items.length && _items[index]['Id'] == item['Id']) {
         setState(() => _items[index] = {...item, 'UserData': fresh['UserData']});
       }
@@ -183,7 +231,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
-  void _closePicker() => setState(() => _picker = _Picker.none);
+  void _closePicker() {
+    final opener = _picker == _Picker.sort ? _sortChip : _genreChip;
+    setState(() => _picker = _Picker.none);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && opener.context != null) opener.requestFocus();
+    });
+  }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
@@ -223,7 +277,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
               left: 120,
               top: 52,
               right: 200,
-              child: NavBar(
+              child: FocusLinks(
+                down: () => focusOn(_lastChip ?? _sortChip),
+                child: NavBar(
                 libraries: widget.libraries,
                 currentId: _libId,
                 onHome: () => Navigator.of(context).popUntil((r) => r.isFirst),
@@ -232,6 +288,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   Navigator.of(context).pushReplacement(MaterialPageRoute(
                       builder: (_) => LibraryScreen(jf: jf, libraries: widget.libraries, library: lib)));
                 },
+              ),
               ),
             ),
             Positioned(left: 120, right: 120, top: 150, child: _header(subtitle)),
@@ -279,13 +336,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
           Text(subtitle, style: tvBody(22, color: kDim)),
         ]),
       ),
-      FocusTraversalGroup(
+      FocusLinks(
+        down: _focusGrid,
+        child: FocusTraversalGroup(
         child: Wrap(spacing: 12, children: [
           Focusable(
+            focusNode: _sortChip,
+            onFocus: (_) => _lastChip = _sortChip,
             onSelect: () => _openPicker(_Picker.sort),
             builder: (f) => tvPill(_sort.label, focused: f, icon: Icons.swap_vert_rounded),
           ),
           Focusable(
+            focusNode: _unwatchedChip,
+            onFocus: (_) => _lastChip = _unwatchedChip,
             onSelect: () {
               setState(() => _unwatched = !_unwatched);
               _reload();
@@ -293,6 +356,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             builder: (f) => tvPill('Unwatched', focused: f, on: _unwatched),
           ),
           Focusable(
+            focusNode: _fourKChip,
+            onFocus: (_) => _lastChip = _fourKChip,
             onSelect: () {
               setState(() => _only4k = !_only4k);
               _reload();
@@ -300,10 +365,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
             builder: (f) => tvPill('4K', focused: f, on: _only4k),
           ),
           Focusable(
+            focusNode: _genreChip,
+            onFocus: (_) => _lastChip = _genreChip,
             onSelect: () => _openPicker(_Picker.genre),
             builder: (f) => tvPill(_genre ?? 'Genre', focused: f, on: _genre != null, icon: Icons.expand_more_rounded),
           ),
         ]),
+        ),
       ),
     ]);
   }
@@ -318,12 +386,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
       );
     }
+    if (_error != null && _items.isEmpty) {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 40, left: 24),
+          child: TvError(message: _error!, onRetry: _reload),
+        ),
+      );
+    }
     if (_items.isEmpty) {
       return Align(
         alignment: Alignment.topLeft,
         child: Padding(
           padding: const EdgeInsets.only(top: 40),
-          child: Text('Nothing matches these filters.', style: tvBody(26, color: kMuted)),
+          child: Text(
+              _unwatched || _only4k || _genre != null ? 'Nothing matches these filters.' : 'This library is empty.',
+              style: tvBody(26, color: kMuted)),
         ),
       );
     }
@@ -331,7 +410,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final cellW = (box.maxWidth - 48 - _gap * (_cols - 1)) / _cols;
       final posterH = cellW * 1.5;
       _rowExtent = posterH + 66;
-      return FocusTraversalGroup(
+      return FocusLinks(
+        up: () => _focusedIndex < _cols && focusOn(_lastChip ?? _sortChip),
+        child: FocusTraversalGroup(
         child: GridView.builder(
           controller: _grid,
           clipBehavior: Clip.hardEdge,
@@ -352,6 +433,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             return _poster(i, cellW, posterH);
           },
         ),
+        ),
       );
     });
   }
@@ -366,6 +448,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return Focusable(
       // The first poster takes focus when the screen opens, so the keyboard works right away.
       autofocus: index == 0,
+      focusNode: _posterNodes[index],
+      onFocus: (_) {
+        _focusedIndex = index;
+        // A show selected for a moment: fetch its page now, so opening it is instant.
+        _prefetchTimer?.cancel();
+        if (item['Type'] == 'Series') {
+          _prefetchTimer = Timer(const Duration(milliseconds: 250), () => jf.prefetchShow(item));
+        }
+      },
       scrollAlignment: 0.25,
       onSelect: () => _open(index),
       builder: (f) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -378,6 +469,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             width: w,
             height: h,
             decoration: BoxDecoration(
+              // Shown while the poster loads, so it never looks missing.
+              color: kPlaceholder,
               borderRadius: BorderRadius.circular(12),
               boxShadow: f
                   ? [
@@ -390,8 +483,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: Stack(fit: StackFit.expand, children: [
-                Image.network(
-                  jf.image(item['Id'], 'Primary', maxWidth: 400),
+                netImage(
+                  // Downloaded at the size it's shown on this screen (sharper on 4K, smaller on 1080p).
+                  jf.image(item['Id'], 'Primary', maxWidth: sizeBucket(tvPx(w * 1.07))),
                   cacheWidth: tvPx(w * 1.07),
                   fit: BoxFit.cover,
                   errorBuilder: (_, __, ___) => Container(
@@ -488,16 +582,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return Positioned.fill(
       child: Stack(children: [
         Positioned.fill(
-          child: GestureDetector(onTap: _closePicker, child: Container(color: Colors.black.withOpacity(0.45))),
+          child: GestureDetector(onTap: _closePicker, child: Container(color: Colors.black.withOpacity(0.2))),
         ),
+        // A floating glass card, like the player's panels.
         Positioned(
-          top: 0,
-          bottom: 0,
-          right: 0,
+          top: 40,
+          bottom: 40,
+          right: 40,
           width: 460,
-          child: Container(
-            color: kBg.withOpacity(0.96),
-            padding: const EdgeInsets.fromLTRB(28, 56, 28, 28),
+          child: Frost(
+            radius: 28,
+            padding: const EdgeInsets.fromLTRB(24, 36, 24, 20),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(isSort ? 'Sort by' : 'Genre', style: tvDisplay(30)),
               const SizedBox(height: 24),
@@ -513,23 +608,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           _closePicker();
                           _reload();
                         },
-                        builder: (f) => AnimatedContainer(
-                          duration: const Duration(milliseconds: 120),
-                          margin: const EdgeInsets.only(bottom: 6),
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                          decoration: BoxDecoration(
-                            color: f ? kFg : Colors.transparent,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(children: [
-                            Expanded(
-                              child: Text(options[i].$1,
-                                  style: tvBody(21,
-                                      weight: options[i].$2 ? FontWeight.w700 : FontWeight.w500,
-                                      color: f ? kBg : kFg)),
-                            ),
-                            if (options[i].$2) Icon(Icons.check_rounded, color: f ? kBg : kFg, size: 26),
-                          ]),
+                        builder: (f) => Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: surfaceRow(options[i].$1, focused: f, selected: options[i].$2, height: 58),
                         ),
                       ),
                   ]),
@@ -579,9 +660,44 @@ class _ShowScreenState extends State<ShowScreen> {
     _load();
   }
 
+  // Every focusable thing on the page, so Up and Down always go to the right place:
+  //   Back button  ↕  Play / Mark watched  ↕  season tabs  ↕  episodes
+  final _backNode = namedNode('Show: Back');
+  final _playNode = namedNode('Show: Play/Resume');
+  final _markNode = namedNode('Show: Mark watched');
+  final _tabNodes = FocusNodeList('Show: Season tab');
+  final _epNodes = FocusNodeList('Show: Episode');
+  int _lastEp = -1; // the episode that had focus last, so coming back down returns to it
+
+  void _setHero(bool hero) {
+    if (_hero != hero) setState(() => _hero = hero);
+  }
+
+  bool _focusBelowButtons() => _seasons.length > 1 ? focusOn(_tabNodes[_season]) : _focusEpisode();
+
+  bool _focusEpisode() {
+    if (_episodes.isEmpty) return true; // still loading: stay where we are
+    var i = _lastEp;
+    if (i < 0 || i >= _episodes.length) {
+      final next = _next;
+      i = next == null ? 0 : _episodes.indexWhere((e) => e['Id'] == next['Id']);
+      if (i < 0) i = 0;
+    }
+    return focusOn(_epNodes[i]) || _epNodes.focusFirstVisible();
+  }
+
+  bool _focusAboveEpisodes() => _seasons.length > 1 ? focusOn(_tabNodes[_season]) : focusOn(_playNode);
+
   @override
   void dispose() {
+    _markTimer?.cancel();
+    _seasonTimer?.cancel();
     _epScroll.dispose();
+    _backNode.dispose();
+    _playNode.dispose();
+    _markNode.dispose();
+    _tabNodes.dispose();
+    _epNodes.dispose();
     super.dispose();
   }
 
@@ -622,13 +738,31 @@ class _ShowScreenState extends State<ShowScreen> {
     );
   }
 
-  Future<void> _load({bool keepSeason = false}) async {
+  String? _error;
+
+  // fresh: ask the server again (after watching or marking), instead of using what was
+  // fetched a moment ago when the show's card was selected.
+  Future<void> _load({bool keepSeason = false, bool fresh = false}) async {
+    if (fresh) jf.forgetShow(_id);
+    Object? failure;
     final results = await Future.wait([
       jf.item(_id).catchError((_) => widget.series),
-      jf.seasons(_id).catchError((_) => <dynamic>[]),
+      jf.seasons(_id).catchError((Object e) {
+        failure = e;
+        return <dynamic>[];
+      }),
       jf.nextUp(_id),
     ]);
     if (!mounted) return;
+    if (failure != null) {
+      // Keep what's on screen after a failed refresh; only show the error when there's nothing.
+      setState(() {
+        _loading = false;
+        if (_seasons.isEmpty) _error = errorText(failure!);
+      });
+      return;
+    }
+    _error = null;
     final seasons = results[1] as List<dynamic>;
     final next = results[2];
     var season = keepSeason ? _season : 0;
@@ -658,30 +792,92 @@ class _ShowScreenState extends State<ShowScreen> {
           _episodes = eps;
           _loading = false;
         });
+        _scrollToNext();
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
   }
 
+  // The episode row opens on the next episode to watch, not Episode 1.
+  static const _epStep = 360.0 + 30.0; // card width + gap
+  void _scrollToNext() {
+    final next = _next;
+    if (next == null) return;
+    final i = _episodes.indexWhere((e) => e['Id'] == next['Id']);
+    if (i <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_epScroll.hasClients || !_epScroll.position.hasContentDimensions) return;
+      final p = _epScroll.position;
+      _epScroll.jumpTo((i * _epStep).clamp(p.minScrollExtent, p.maxScrollExtent).toDouble());
+      // Back from watching an episode: select the next one, so Select plays it right away.
+      if (_epNodes.anyFocused) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && focusOn(_epNodes[i])) _lastEp = i;
+        });
+      }
+    });
+  }
+
+  // Moving across the season tabs: a season seen before shows at once; a new one waits until
+  // the tab has been selected for a moment, so holding Left across 28 seasons doesn't send
+  // 28 requests.
+  Timer? _seasonTimer;
+
   void _pickSeason(int i) {
     if (i == _season) return;
+    _seasonTimer?.cancel();
+    final cached = jf.isCached(Jellyfin.episodesKey(_id, _seasons[i]['Id']));
     setState(() {
       _season = i;
       _episodes = [];
+      _lastEp = -1;
+      _loading = true;
     });
-    _loadEpisodes();
+    if (cached) {
+      _loadEpisodes();
+    } else {
+      _seasonTimer = Timer(const Duration(milliseconds: 180), _loadEpisodes);
+    }
   }
 
   Future<void> _play(dynamic episode) async {
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => PlayerScreen(jf: jf, item: episode)));
-    _load(keepSeason: true);
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => playerScreen(jf, episode)));
+    // Back from watching: the page moves to the next episode's season (after a season finale,
+    // that's the next season), with the next episode selected.
+    _load(fresh: true);
   }
+
+  // Marking a whole season can't be undone from here, so it takes two presses:
+  // the first asks "Press again to confirm" for a few seconds.
+  bool _confirmMark = false;
+  String? _markNote;
+  Timer? _markTimer;
 
   Future<void> _markSeason() async {
     if (_seasons.isEmpty) return;
-    await jf.markPlayed(_seasons[_season]['Id']);
-    _load(keepSeason: true);
+    _markTimer?.cancel();
+    if (!_confirmMark) {
+      setState(() => _confirmMark = true);
+      _markTimer = Timer(const Duration(seconds: 4), () {
+        if (mounted) setState(() => _confirmMark = false);
+      });
+      return;
+    }
+    setState(() {
+      _confirmMark = false;
+      _markNote = 'Marking…';
+    });
+    try {
+      await jf.markPlayed(_seasons[_season]['Id']);
+      if (mounted) setState(() => _markNote = 'Season marked watched');
+      await _load(keepSeason: true, fresh: true);
+    } catch (e) {
+      if (mounted) setState(() => _markNote = errorText(e));
+    }
+    _markTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _markNote = null);
+    });
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -720,71 +916,40 @@ class _ShowScreenState extends State<ShowScreen> {
           child: Stack(children: [
             Positioned.fill(
               child: RepaintBoundary(
-                child: Image.network(
-                  jf.backdropFor(series, maxWidth: tvPx(2560).clamp(1280, 3840)),
-                  cacheWidth: tvPx(2560).clamp(1280, 3840),
+                // Keep the top of the artwork (faces, titles); trim the hidden bottom instead.
+                child: netImage(
+                  jf.backdropFor(series, maxWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560)),
+                  cacheWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560),
                   fit: BoxFit.cover,
-                  // Keep the top of the artwork (faces, titles); trim the hidden bottom instead.
                   alignment: Alignment.topCenter,
+                  gaplessPlayback: true,
                   errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder),
                 ),
               ),
             ),
+            // Shading over the backdrop: one small picture stretched, made once (see ShadeOverlay).
+            const Positioned.fill(child: ShadeOverlay(shades: [kShadeLeft, kShadeTopBottom])),
+            // Strong fade under the episodes, only when they're up (see FadingShade).
             Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      kBg.withOpacity(0.8),
-                      kBg.withOpacity(0.62),
-                      kBg.withOpacity(0.35),
-                      kBg.withOpacity(0.12),
-                      kBg.withOpacity(0),
-                    ],
-                    stops: const [0, 0.22, 0.42, 0.6, 0.75],
-                  ),
-                ),
-              ),
-            ),
-            // Light fade at the top and bottom edges, always on.
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [kBg.withOpacity(0.35), kBg.withOpacity(0), kBg.withOpacity(0), kBg.withOpacity(0.75)],
-                    stops: const [0, 0.18, 0.72, 1],
-                  ),
-                ),
-              ),
-            ),
-            // Strong fade under the episodes, only when they're up.
-            Positioned.fill(
-              child: IgnorePointer(
-                child: AnimatedOpacity(
-                  opacity: _hero ? 0 : 1,
-                  duration: _move,
-                  curve: Curves.easeOutCubic,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [kBg.withOpacity(0), kBg.withOpacity(0), kBg.withOpacity(0.9), kBg],
-                        stops: const [0, 0.34, 0.56, 0.72],
-                      ),
-                    ),
-                  ),
-                ),
+              child: FadingShade(
+                visible: !_hero,
+                duration: _move,
+                curve: Curves.easeOutCubic,
+                alphas: const [0, 0, 0.9, 1],
+                stops: const [0, 0.34, 0.56, 0.72],
               ),
             ),
             Positioned(
               left: 120,
               top: 52,
-              child: Focusable(
+              child: FocusLinks(
+                down: () => focusOn(_playNode),
+                child: Focusable(
+                focusNode: _backNode,
                 onSelect: () => Navigator.of(context).maybePop(),
-                onFocus: (_) => setState(() => _hero = true),
+                onFocus: (viaMouse) {
+                  if (!viaMouse) _setHero(true);
+                },
                 builder: (f) => AnimatedContainer(
                   duration: const Duration(milliseconds: 140),
                   width: 52,
@@ -792,6 +957,7 @@ class _ShowScreenState extends State<ShowScreen> {
                   decoration: BoxDecoration(shape: BoxShape.circle, color: f ? kFg : kFg.withOpacity(0.12)),
                   child: Icon(Icons.arrow_back_rounded, size: 28, color: f ? kBg : kFg),
                 ),
+              ),
               ),
             ),
             // Title, summary and buttons sit low over the full artwork, and move up when the
@@ -802,25 +968,14 @@ class _ShowScreenState extends State<ShowScreen> {
               left: 120,
               top: _hero ? 470 : 140,
               width: 1000,
-              child: Focus(
-                canRequestFocus: false,
-                skipTraversal: true,
-                onFocusChange: (f) {
-                  if (f) setState(() => _hero = true);
-                },
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 SizedBox(
                   height: 120,
                   child: Align(
                     alignment: Alignment.bottomLeft,
                     child: logo == null
                         ? title
-                        : Image.network(logo,
-                            height: 120,
-                            cacheHeight: tvPx(120),
-                            fit: BoxFit.contain,
-                            alignment: Alignment.bottomLeft,
-                            errorBuilder: (_, __, ___) => title),
+                        : LogoImage(url: logo, height: 120, cacheHeight: tvPx(120), fallback: title),
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -836,10 +991,17 @@ class _ShowScreenState extends State<ShowScreen> {
                   ),
                 ],
                 const SizedBox(height: 22),
-                FocusTraversalGroup(
+                FocusLinks(
+                  up: () => focusOn(_backNode),
+                  down: _focusBelowButtons,
+                  child: FocusTraversalGroup(
                   child: Row(children: [
                     Focusable(
                       autofocus: true,
+                      focusNode: _playNode,
+                      onFocus: (viaMouse) {
+                        if (!viaMouse) _setHero(true);
+                      },
                       onSelect: () {
                         final target = _next ?? (_episodes.isNotEmpty ? _episodes.first : null);
                         if (target != null) _play(target);
@@ -849,7 +1011,7 @@ class _ShowScreenState extends State<ShowScreen> {
                         height: 64,
                         padding: const EdgeInsets.only(left: 26, right: 34),
                         decoration: BoxDecoration(
-                          color: f ? kFg : kFg.withOpacity(0.14),
+                          color: f ? kFg : kPillFill,
                           borderRadius: BorderRadius.circular(999),
                           boxShadow: f ? [BoxShadow(color: kFg.withOpacity(0.22), spreadRadius: 5)] : [],
                         ),
@@ -862,6 +1024,21 @@ class _ShowScreenState extends State<ShowScreen> {
                     ),
                     const SizedBox(width: 16),
                     Focusable(
+                      onFocus: (viaMouse) {
+                        if (!viaMouse) _setHero(true);
+                      },
+                      onSelect: () {
+                        final target = _next ?? (_episodes.isNotEmpty ? _episodes.first : null);
+                        if (target != null) startWatchTogether(context, jf, target);
+                      },
+                      builder: watchTogetherButton,
+                    ),
+                    const SizedBox(width: 16),
+                    Focusable(
+                      focusNode: _markNode,
+                      onFocus: (viaMouse) {
+                        if (!viaMouse) _setHero(true);
+                      },
                       onSelect: _markSeason,
                       builder: (f) => AnimatedContainer(
                         duration: const Duration(milliseconds: 150),
@@ -869,17 +1046,17 @@ class _ShowScreenState extends State<ShowScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 28),
                         alignment: Alignment.center,
                         decoration: BoxDecoration(
-                          color: f ? kFg : kFg.withOpacity(0.14),
+                          color: f ? kFg : kPillFill,
                           borderRadius: BorderRadius.circular(999),
                         ),
-                        child: Text('Mark season watched',
+                        child: Text(_markNote ?? (_confirmMark ? 'Press again to confirm' : 'Mark season watched'),
                             style: tvBody(24, weight: FontWeight.w600, color: f ? kBg : kFg)),
                       ),
                     ),
                   ]),
+                  ),
                 ),
               ]),
-              ),
             ),
             // Seasons and episodes peek in at the bottom over the full artwork, and rise when
             // focus moves down into them.
@@ -890,17 +1067,21 @@ class _ShowScreenState extends State<ShowScreen> {
               right: 0,
               top: _hero ? 880 : 600,
               bottom: 0,
-              child: Focus(
-                canRequestFocus: false,
-                skipTraversal: true,
-                onFocusChange: (f) {
-                  if (f) setState(() => _hero = false);
-                },
-                child: Stack(children: [
-                  Positioned(left: 120, right: 120, top: 0, child: _seasonTabs()),
-                  Positioned(left: 0, right: 0, top: _seasons.length > 1 ? 76 : 0, bottom: 0, child: _episodeRow()),
-                ]),
-              ),
+              child: Stack(children: [
+                Positioned(
+                  left: 120,
+                  right: 120,
+                  top: 0,
+                  child: FocusLinks(up: () => focusOn(_playNode), down: _focusEpisode, child: _seasonTabs()),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  top: _seasons.length > 1 ? 76 : 0,
+                  bottom: 0,
+                  child: FocusLinks(up: _focusAboveEpisodes, child: _episodeRow()),
+                ),
+              ]),
             ),
             // Mouse wheel: down brings the episodes up, up goes back to the full artwork.
             // It listens without blocking clicks on anything underneath.
@@ -930,10 +1111,15 @@ class _ShowScreenState extends State<ShowScreen> {
         child: Row(children: [
           for (var i = 0; i < _seasons.length; i++) ...[
             Focusable(
+              focusNode: _tabNodes[i],
               scrollAlignment: 0,
               onSelect: () => _pickSeason(i),
+              // Moving across the tabs with the controller shows each season's episodes.
               onFocus: (viaMouse) {
-                if (!viaMouse) _pickSeason(i);
+                if (!viaMouse) {
+                  _setHero(false);
+                  _pickSeason(i);
+                }
               },
               builder: (f) => tvPill(_seasons[i]['Name']?.toString() ?? 'Season ${i + 1}',
                   focused: f, on: i == _season, size: 23),
@@ -946,6 +1132,21 @@ class _ShowScreenState extends State<ShowScreen> {
   }
 
   Widget _episodeRow() {
+    if (_error != null) {
+      return Padding(
+        padding: const EdgeInsets.only(left: 120, top: 30),
+        child: TvError(
+          message: _error!,
+          onRetry: () {
+            setState(() {
+              _error = null;
+              _loading = true;
+            });
+            _load();
+          },
+        ),
+      );
+    }
     if (_loading && _episodes.isEmpty) {
       return Padding(
         padding: const EdgeInsets.only(left: 120, top: 30),
@@ -993,6 +1194,11 @@ class _ShowScreenState extends State<ShowScreen> {
           final mins = runtimeMinutes(ep);
           final overview = (ep['Overview'] ?? '').toString();
           return Focusable(
+            focusNode: _epNodes[i],
+            onFocus: (viaMouse) {
+              _lastEp = i;
+              if (!viaMouse) _setHero(false);
+            },
             onSelect: () => _play(ep),
             builder: (f) => SizedBox(
               width: w,
@@ -1005,6 +1211,8 @@ class _ShowScreenState extends State<ShowScreen> {
                     width: w,
                     height: h,
                     decoration: BoxDecoration(
+                      // Shown while the picture loads, so a card never looks missing.
+                      color: kPlaceholder,
                       borderRadius: BorderRadius.circular(14),
                       boxShadow: f
                           ? [
@@ -1018,8 +1226,8 @@ class _ShowScreenState extends State<ShowScreen> {
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(14),
                       child: Stack(fit: StackFit.expand, children: [
-                        Image.network(
-                          jf.image(ep['Id'], 'Primary', maxWidth: 720),
+                        netImage(
+                          jf.image(ep['Id'], 'Primary', maxWidth: sizeBucket(tvPx(w * 1.06))),
                           cacheWidth: tvPx(w * 1.06),
                           fit: BoxFit.cover,
                           errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder),

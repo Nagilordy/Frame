@@ -7,13 +7,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'ui.dart' show Focusable;
+import 'gamepad.dart' show PadHint, PadHints, PadButton, padActive, fullScreenHint;
+import 'ui.dart' show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent;
 import 'main.dart' show Jellyfin;
+import 'banners.dart' show showBanner, bannerIcon;
+import 'syncplay.dart' show SyncPlay, RoomFollower, RoomVideo;
 
 // ---------- Look (same palette as the home screen) ----------
 
@@ -23,10 +25,9 @@ const _muted = Color(0xFFB9C0CB);
 const _soft = Color(0xFFD3D8E0);
 
 TextStyle _body(double size, {FontWeight weight = FontWeight.w500, Color color = _fg}) =>
-    GoogleFonts.getFont('Hanken Grotesk', fontSize: size, fontWeight: weight, color: color);
+    tvBody(size, weight: weight, color: color);
 
-TextStyle _display(double size) => GoogleFonts.getFont('Sora',
-    fontSize: size, fontWeight: FontWeight.w700, color: _fg, letterSpacing: -0.02 * size, height: 1.1);
+TextStyle _display(double size) => tvDisplay(size);
 
 const _back = Duration(seconds: 10);
 const _forward = Duration(seconds: 30);
@@ -64,15 +65,18 @@ String _qualityLine(dynamic item) {
 // ---------- The screen ----------
 
 class PlayerScreen extends StatefulWidget {
-  const PlayerScreen({super.key, required this.jf, required this.item});
+  const PlayerScreen({super.key, required this.jf, required this.item, this.sync, this.playlistItemId, this.startTicks});
   final Jellyfin jf;
   final dynamic item;
+  final SyncPlay? sync; // a Watch together room, or null
+  final String? playlistItemId;
+  final int? startTicks; // where the room starts (instead of your resume point)
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-enum _Panel { none, audio, subtitles }
+enum _Panel { none, playback, audio, subtitles }
 
 class _PlayerScreenState extends State<PlayerScreen> {
   // A larger buffer keeps more of the file ready, which helps smoothness and seeking over the network.
@@ -87,8 +91,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final _rootFocus = FocusNode();
   final _playFocus = FocusNode();
   final _panelFirst = FocusNode();
+  // Fixed Up / Down jumps: Back button ↕ progress bar ↕ Play and the other buttons.
+  final _backFocus = FocusNode();
+  final _barFocus = FocusNode();
 
   bool _controls = true;
+  bool _chrome = true; // controls are built (true while visible or fading out)
   bool _info = false;
 
   // Subtitle style, remembered between videos.
@@ -104,7 +112,335 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final _subs = <StreamSubscription>[];
 
   String get _id => widget.item['Id'];
-  int get _resumeTicks => (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
+
+  // ---------- Original file or the server's version, and adapting to this device ----------
+  //
+  // Two ways to play, like Jellyfin's own apps:
+  //   Original file: played straight from the NAS, untouched. Best quality.
+  //   Converted by the server: Jellyfin re-encodes it on the NAS into a plain 4K stream with
+  //     normal colours, and this device just plays that. For devices that can't keep up.
+  // The Playback button chooses: Automatic (the default), Original file, or Server.
+  //
+  // Automatic starts with the original file at full quality. Every 10 seconds it checks how
+  // many frames had to be dropped. If this device can't keep up (5 or more in 10 s of normal
+  // playback, not counting pauses or skips), it eases off one step:
+  //   normal videos:   step 1 simpler scaling (same resolution) -> step 2 the server's version
+  //   Dolby Vision P5: step 1 the server's version (it fixes the colours on the NAS)
+  // The step is remembered per device, so the next video starts the way that works. After a
+  // long video with no dropped frames, it tries one step higher next time.
+  int _level = 0;
+  int _levelAtStart = 0;
+  bool _eased = false; // stepped down during this video
+  int _lastDrops = -1;
+  int _cleanSeconds = 0; // playback checked with no drops at the current step
+  DateTime _lastSeek = DateTime(0);
+  Timer? _adaptTimer;
+
+  String _mode = 'auto'; // the Playback choice: auto, original, server
+  bool _server = false; // playing the server's version right now
+  bool _switching = false;
+  String? _session; // Jellyfin's play session while it converts
+  // With the server's version: the chosen audio and subtitle streams (Jellyfin's numbering),
+  // and the text subtitles it sends as separate files, by stream number.
+  int? _serverAudio;
+  int? _serverSub; // an image subtitle drawn into the picture by the server, or null
+  int? _serverTextSub; // a text subtitle shown on this device, or null
+  final Map<int, String> _serverSubUrls = {};
+
+  String get _levelKey => _isDolbyVisionOnly ? 'playbackStepDolbyVision' : 'playbackStep';
+  int get _serverStep => _isDolbyVisionOnly ? 1 : 2;
+  int get _maxLevel => _mode == 'original' ? _serverStep - 1 : _serverStep;
+
+  Future<void> _loadLevel() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _mode = prefs.getString('playbackMode') ?? 'auto';
+      _level = (prefs.getInt(_levelKey) ?? 0).clamp(0, _maxLevel).toInt();
+    } catch (_) {}
+    _levelAtStart = _level;
+    if (_level > 0) debugPrint('Player: this device plays smoothest at step $_level, starting there');
+  }
+
+  Future<void> _applyLevel() async {
+    final mpv = player.platform;
+    if (mpv is! NativePlayer || _level < 1 || _server) return;
+    Future<void> set(String name, String value) async {
+      try {
+        await mpv.setProperty(name, value);
+      } catch (_) {}
+    }
+
+    await set('scale', 'bilinear');
+    await set('dscale', 'bilinear');
+    await set('cscale', 'bilinear');
+    await set('dither-depth', 'no');
+    await set('correct-downscaling', 'no');
+    await set('linear-downscaling', 'no');
+    await set('sigmoid-upscaling', 'no');
+    await set('deband', 'no');
+  }
+
+  Future<void> _checkSmoothness() async {
+    final mpv = player.platform;
+    if (!mounted || mpv is! NativePlayer || _switching) return;
+    int drops;
+    try {
+      drops = int.parse(await mpv.getProperty('frame-drop-count'));
+    } catch (_) {
+      return;
+    }
+    final previous = _lastDrops;
+    _lastDrops = drops;
+    if (previous < 0 || drops < previous) return;
+    // Only judge stretches of normal playback.
+    if (!player.state.playing ||
+        player.state.buffering ||
+        DateTime.now().difference(_lastSeek) < const Duration(seconds: 12)) {
+      return;
+    }
+    final dropped = drops - previous;
+    if (dropped == 0) {
+      _cleanSeconds += 10;
+      return;
+    }
+    _cleanSeconds = 0;
+    if (dropped < 5 || _level >= _maxLevel || _server) return;
+    _level++;
+    _eased = true;
+    debugPrint('Player: $dropped frames dropped in 10 s, easing off to step $_level for this device');
+    try {
+      await (await SharedPreferences.getInstance()).setInt(_levelKey, _level);
+    } catch (_) {}
+    if (_level >= _serverStep) {
+      await _switchSource(server: true);
+    } else {
+      await _applyLevel();
+    }
+    _lastDrops = -1; // count fresh after the change
+    _lastSeek = DateTime.now();
+  }
+
+  // A long, clean video at a lowered step: next time, try one step higher.
+  void _saveLearnedLevel() {
+    if (_eased || _levelAtStart == 0 || _level != _levelAtStart || _cleanSeconds < 600) return;
+    final key = _levelKey;
+    final next = _level - 1;
+    SharedPreferences.getInstance().then((p) => p.setInt(key, next)).then((_) {}, onError: (_) {});
+  }
+
+  // Opens the server's version (server: true) or the original file, at the same moment.
+  // Returns false if the server couldn't provide its version (playback continues unchanged).
+  Future<bool> _openSource({required bool server, Duration? at}) async {
+    final mpv = player.platform;
+    String url;
+    String? session;
+    List<({String url, String label, String? language, int index})> subtitles = const [];
+    if (server) {
+      try {
+        final stream = await widget.jf.serverStream(_id, audioIndex: _serverAudio, subtitleIndex: _serverSub);
+        url = stream.url;
+        session = stream.session;
+        subtitles = stream.subtitles;
+      } catch (e) {
+        debugPrint('Player: the server could not provide its version: $e');
+        return false;
+      }
+    } else {
+      url = widget.jf.directStreamUrl(_id);
+    }
+    if (mpv is NativePlayer) {
+      if (server) {
+        // The server already fixed the colours: no conversion on this device.
+        await mpv.setProperty('vf', '');
+        await mpv.setProperty('hwdec', 'auto-safe');
+      } else if (_isDolbyVisionOnly) {
+        await _applyDvFilter();
+      }
+      if (at != null) await mpv.setProperty('start', (at.inMilliseconds / 1000).toStringAsFixed(1));
+    }
+    _server = server;
+    _session = session;
+    _serverSubUrls
+      ..clear()
+      ..addEntries(subtitles.map((s) => MapEntry(s.index, s.url)));
+    final wasPlaying = player.state.playing;
+    await player.open(Media(url), play: widget.sync == null || wasPlaying);
+    // A text subtitle that was on before the switch: turn it back on.
+    final text = _serverTextSub;
+    if (server && text != null && _serverSubUrls[text] != null) await _showServerTextSub(text);
+    debugPrint('Player: playing ${server ? "the server's version" : 'the original file'}');
+    return true;
+  }
+
+  // A text subtitle of the server's version, shown by this device (switches instantly).
+  Future<void> _showServerTextSub(int index) async {
+    final mpv = player.platform;
+    final url = _serverSubUrls[index];
+    if (mpv is! NativePlayer || url == null) return;
+    try {
+      await mpv.command(['sub-add', url, 'select']);
+      await mpv.setProperty('sub-visibility', 'yes');
+    } catch (e) {
+      debugPrint('Player: subtitle could not be added: $e');
+    }
+  }
+
+  // With the server's version: choose audio. The server restarts its stream with that
+  // track, at the same moment.
+  Future<void> _chooseServerAudio(int index) async {
+    if (index == _serverAudio) return;
+    _serverAudio = index;
+    await _switchSource(server: true, force: true);
+  }
+
+  // With the server's version: choose subtitles (null = off). Text ones switch on this device
+  // instantly; image ones (Blu-ray) are drawn into the picture by the server, which restarts
+  // its stream at the same moment.
+  Future<void> _chooseServerSubtitle(dynamic stream) async {
+    if (stream == null) {
+      _serverTextSub = null;
+      await player.setSubtitleTrack(SubtitleTrack.no());
+      if (_serverSub != null) {
+        _serverSub = null;
+        await _switchSource(server: true, force: true);
+      }
+      return;
+    }
+    final index = (stream['Index'] ?? -1) as int;
+    if (stream['IsTextSubtitleStream'] == true && _serverSubUrls[index] != null) {
+      _serverTextSub = index;
+      if (_serverSub != null) {
+        _serverSub = null;
+        await _switchSource(server: true, force: true); // turns the text one back on after
+      } else {
+        await _showServerTextSub(index);
+      }
+    } else {
+      _serverTextSub = null;
+      await player.setSubtitleTrack(SubtitleTrack.no());
+      _serverSub = index;
+      await _switchSource(server: true, force: true);
+    }
+  }
+
+  // Switches between the original file and the server's version mid-video (force: reopen the
+  // server's version, e.g. with another audio track).
+  Future<void> _switchSource({required bool server, bool force = false}) async {
+    if (_switching || (server == _server && !force)) return;
+    _switching = true;
+    final at = player.state.position;
+    final oldSession = _session;
+    try {
+      if (await _openSource(server: server, at: at)) {
+        // Tell Jellyfin: the old way stopped here, the new one starts here.
+        widget.jf.reportStopped(_id, at.inMicroseconds * 10, session: oldSession);
+        widget.jf.reportStart(_id, at.inMicroseconds * 10, session: _session);
+      }
+    } finally {
+      _switching = false;
+      _lastSeek = DateTime.now();
+      _lastDrops = -1;
+      if (mounted) setState(() {});
+      // In a room: the new stream has to catch up with everyone again.
+      if (_room != null) unawaited(_roomReady());
+    }
+  }
+
+  // The Playback choice from the panel.
+  Future<void> _setMode(String mode) async {
+    _mode = mode;
+    try {
+      await (await SharedPreferences.getInstance()).setString('playbackMode', mode);
+    } catch (_) {}
+    if (mode == 'server') {
+      await _switchSource(server: true);
+    } else if (mode == 'original') {
+      _level = _level.clamp(0, _maxLevel).toInt();
+      await _switchSource(server: false);
+    }
+    if (mounted) setState(() {});
+  }
+
+  // The Dolby Vision conversion itself: exactly the settings that gave correct colours.
+  static const _dvConvert = 'libplacebo=apply_dolbyvision=1'
+      ':tonemapping=bt.2446a:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:format=yuv420p';
+
+  // Decoded on the GPU, copied to the conversion step.
+  Future<void> _applyDvFilter() async {
+    final mpv = player.platform;
+    if (mpv is! NativePlayer) return;
+    await mpv.setProperty('hwdec', 'auto-copy-safe');
+    await mpv.setProperty('vf', 'lavfi=[$_dvConvert]');
+  }
+
+  // Dolby Vision with no HDR10 or SDR picture inside (Profile 5). Jellyfin calls it "DOVI";
+  // the kinds with a fallback picture are "DOVIWithHDR10", "DOVIWithSDR" and so on.
+  bool get _isDolbyVisionOnly {
+    final streams = (widget.item['MediaStreams'] as List?) ?? [];
+    final video = streams.cast<dynamic>().firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
+    return video != null && video['VideoRangeType'] == 'DOVI';
+  }
+  int get _resumeTicks => widget.startTicks ?? (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
+
+  // ---------- Watch together ----------
+  RoomFollower? _room;
+
+  void _startRoom() {
+    final sync = widget.sync;
+    if (sync == null) return;
+    _room = RoomFollower(
+      sync: sync,
+      playlistItemId: widget.playlistItemId ?? '',
+      itemId: _id,
+      myName: widget.jf.userName,
+      position: () => player.state.position.inMicroseconds / 1e6,
+      isPaused: () => !player.state.playing,
+      seekTo: (sec) => player.seek(Duration(microseconds: (sec * 1e6).round())),
+      setPaused: (paused) => paused ? player.pause() : player.play(),
+      setSpeed: (speed) => player.setRate(speed),
+      notice: (text) {
+        if (mounted) {
+          showBanner(context,
+              picture: bannerIcon(Icons.groups_rounded),
+              who: 'Watch together',
+              text: text,
+              line: kAccent,
+              duration: const Duration(milliseconds: 3500));
+        }
+      },
+      onStop: () {
+        if (mounted) Navigator.of(context).maybePop();
+      },
+      onNewVideo: _switchRoomVideo,
+    )..start();
+    _subs.add(player.stream.buffering.listen((b) {
+      if (!_switching && player.state.duration > Duration.zero) _room?.stalled(b);
+    }));
+  }
+
+  Future<void> _switchRoomVideo(RoomVideo now) async {
+    try {
+      final item = await widget.jf.item(now.itemId, fresh: true);
+      if (!mounted) return;
+      _room?.handingOver = true;
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+          builder: (_) => PlayerScreen(
+              jf: widget.jf, item: item, sync: widget.sync, playlistItemId: now.playlistItemId, startTicks: now.startTicks)));
+    } catch (e) {
+      debugPrint("Together: could not open the room's new video: $e");
+    }
+  }
+
+  // The video is open: once it has settled, tell the room this player is ready.
+  Future<void> _roomReady() async {
+    final room = _room;
+    if (room == null) return;
+    for (var i = 0; i < 100 && mounted; i++) {
+      if (!player.state.buffering && player.state.duration > Duration.zero) break;
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (mounted) await room.ready();
+  }
   int get _ticksNow => player.state.position.inMicroseconds * 10;
 
   @override
@@ -117,14 +453,73 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _scheduleHide();
       } else {
         _hideTimer?.cancel();
-        if (!_controls) setState(() => _controls = true);
+        if (!_controls) {
+          setState(() {
+            _controls = true;
+            _chrome = true;
+          });
+        }
       }
     }));
     // Close the player when the video ends.
     _subs.add(player.stream.completed.listen((done) {
       if (done && mounted) Navigator.of(context).maybePop();
     }));
+    // mpv also reports small, harmless problems here, so an error only counts if the video
+    // still hasn't started a few seconds later.
+    _subs.add(player.stream.error.listen((message) {
+      Timer(const Duration(seconds: 4), () {
+        if (player.state.duration == Duration.zero) _fail(message);
+      });
+    }));
+    // Still nothing after 25 seconds: say so instead of spinning forever.
+    _openTimer = Timer(const Duration(seconds: 25), () {
+      if (player.state.duration == Duration.zero) {
+        _fail("The server isn't sending the video. Check that the NAS is on.");
+      }
+    });
     _start();
+  }
+
+  String? _failure;
+  Timer? _openTimer;
+
+  void _fail(String message) {
+    if (!mounted || _failure != null || _switching) return;
+    _openTimer?.cancel();
+    debugPrint('Playback failed: $message');
+    setState(() => _failure = message);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _failFocus.requestFocus();
+    });
+  }
+
+  final _failFocus = FocusNode();
+
+  // Shown instead of the endless spinner when a video can't play.
+  Widget _failureBox() {
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 760),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text("This video couldn't play", style: _display(34), textAlign: TextAlign.center),
+              const SizedBox(height: 14),
+              Text(_failure!,
+                  textAlign: TextAlign.center,
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: _body(20, color: _muted)),
+              const SizedBox(height: 30),
+              _iconButton(Icons.arrow_back_rounded, () => Navigator.of(context).maybePop(),
+                  focusNode: _failFocus, label: 'Back', size: 64, iconSize: 32),
+            ]),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _start() async {
@@ -132,6 +527,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (mpv is NativePlayer) {
       // Decode on the GPU when the hardware supports the codec, otherwise fall back safely.
       await mpv.setProperty('hwdec', 'auto-safe');
+      // Dolby Vision Profile 5 (Disney+ and similar) has no normal HDR picture inside, only
+      // Dolby's own colour format, so shown as-is it comes out pink and green. mpv only
+      // converts it with its newer drawing engine, which the embedded player can't use yet.
+      // So for these files the conversion runs as a separate step (libplacebo, the same code
+      // that engine uses) before the picture reaches the screen: Dolby Vision colours applied,
+      // then converted for the screen. Other files are untouched. If the system's video
+      // library lacks that step, mpv just skips it and plays as before.
+      if (_isDolbyVisionOnly) {
+        debugPrint('Player: Dolby Vision Profile 5 (colours fixed by libplacebo here, or by the server)');
+      }
       // HDR to SDR conversion, without per-frame brightness measuring (heavy on small GPUs).
       await mpv.setProperty('tone-mapping', 'bt.2446a');
       await mpv.setProperty('hdr-compute-peak', 'no');
@@ -152,16 +557,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await mpv.setProperty('sub-ass-override', 'scale');
       await _loadSubStyle();
       await _applySubStyle();
-      // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
-      if (_resumeTicks > 0) {
-        await mpv.setProperty('start', (_resumeTicks / 10000000).toStringAsFixed(1));
-      }
+      await _loadLevel();
+      await _applyLevel();
     }
-    await player.open(Media(widget.jf.directStreamUrl(_id)));
-    widget.jf.reportStart(_id, _resumeTicks);
+    // Original file or the server's version (see "Original file or the server's version").
+    final wantServer = _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
+    // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
+    final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
+    try {
+      _switching = true;
+      final ok = await _openSource(server: wantServer, at: resume);
+      if (!ok) await _openSource(server: false, at: resume); // server unavailable: original
+    } catch (e) {
+      _fail('$e');
+      return;
+    } finally {
+      _switching = false;
+    }
+    // Left the player while it was still opening: don't start reporting.
+    if (!mounted) return;
+    if (widget.sync != null) {
+      _startRoom();
+      unawaited(_roomReady());
+    }
+    widget.jf.reportStart(_id, _resumeTicks, session: _session);
     _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      widget.jf.reportProgress(_id, _ticksNow, !player.state.playing);
+      if (_switching) return;
+      widget.jf.reportProgress(_id, _ticksNow, !player.state.playing, session: _session);
     });
+    _lastSeek = DateTime.now(); // the start itself can drop a frame or two
+    _adaptTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkSmoothness());
     if (mounted) _playFocus.requestFocus();
   }
 
@@ -173,10 +598,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _hideTimer?.cancel();
     _statsTimer?.cancel();
     _syncTimer?.cancel();
-    widget.jf.reportStopped(_id, _ticksNow);
+    _openTimer?.cancel();
+    _adaptTimer?.cancel();
+    _saveLearnedLevel();
+    _room?.dispose();
+    _failFocus.dispose();
+    if (_failure == null || _session != null) widget.jf.reportStopped(_id, _ticksNow, session: _session);
     player.dispose();
     _rootFocus.dispose();
     _playFocus.dispose();
+    _backFocus.dispose();
+    _barFocus.dispose();
     _panelFirst.dispose();
     super.dispose();
   }
@@ -195,8 +627,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _showControls({bool focusPlay = false}) {
     if (!_controls) {
-      setState(() => _controls = true);
-      if (focusPlay) _playFocus.requestFocus();
+      setState(() {
+        _controls = true;
+        _chrome = true;
+      });
+      // The buttons are rebuilt this frame; select Play once they exist.
+      if (focusPlay) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _playFocus.requestFocus();
+        });
+      }
     }
     _scheduleHide();
   }
@@ -213,7 +653,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // ---------- Actions ----------
 
   void _togglePlay() {
-    player.playOrPause();
+    final room = _room;
+    if (room != null) {
+      room.togglePause();
+    } else {
+      player.playOrPause();
+    }
     _showControls();
   }
 
@@ -222,8 +667,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     var target = player.state.position + by;
     if (target < Duration.zero) target = Duration.zero;
     if (duration > Duration.zero && target > duration) target = duration;
-    player.seek(target);
+    _lastSeek = DateTime.now();
+    final room = _room;
+    if (room != null) {
+      room.seek(target.inMicroseconds / 1e6);
+    } else {
+      player.seek(target);
+    }
     _showControls();
+  }
+
+  // Jumps between the Back button, progress bar and buttons, keeping the controls up.
+  bool _go(FocusNode node) {
+    _scheduleHide();
+    return focusOn(node);
   }
 
   void _openPanel(_Panel panel) {
@@ -272,7 +729,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() => _stats = 'Decoder  ${hw.isEmpty || hw == 'no' ? 'CPU' : 'GPU ($hw)'}\n'
         'Dropped frames  $dropped / $decoderDropped\n'
         'Buffered  ${cacheSecs}s\n'
-        'Direct play from the original file');
+        'Source  ${_server ? 'converted by your server (NAS)' : 'original file, direct play'}'
+        '${_isDolbyVisionOnly && !_server ? '\nDolby Vision P5: colours converted by libplacebo' : ''}'
+        '${!_server && _level > 0 ? '\nPicture  eased for this device (step $_level)' : ''}'
+        '\nPlayback choice  ${_mode == 'auto' ? 'Automatic' : _mode == 'server' ? 'Server' : 'Original file'}');
   }
 
   // ---------- Keyboard ----------
@@ -281,9 +741,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
 
-    // Space always plays or pauses.
-    if (key == LogicalKeyboardKey.space) {
+    // The video couldn't play: Back leaves, everything else goes to the Back button.
+    if (_failure != null) {
+      if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace) {
+        Navigator.of(context).maybePop();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
+    // Space (or Options on the controller) always plays or pauses.
+    if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.mediaPlayPause) {
       _togglePlay();
+      return KeyEventResult.handled;
+    }
+    // L1 / R1 on the controller always skip, controls up or not.
+    if (_panel == _Panel.none && key == LogicalKeyboardKey.mediaRewind) {
+      _skip(-_back);
+      return KeyEventResult.handled;
+    }
+    if (_panel == _Panel.none && key == LogicalKeyboardKey.mediaFastForward) {
+      _skip(_forward);
       return KeyEventResult.handled;
     }
 
@@ -337,7 +815,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ].join(' · ')
         : (item['ProductionYear']?.toString() ?? '');
 
-    return Focus(
+    // Controller legend: hidden while just watching, so the picture stays clean.
+    final hints = _failure != null
+        ? const [PadHint(PadButton.back, 'Back')]
+        : _panel != _Panel.none
+        ? const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')]
+        : _controls
+            ? [
+                const PadHint(PadButton.select, 'Select'),
+                const PadHint(PadButton.playPause, 'Play/Pause'),
+                const PadHint(PadButton.skip, 'Skip'),
+                const PadHint(PadButton.back, 'Hide'),
+                if (isDesktop) fullScreenHint(),
+              ]
+            : const <PadHint>[];
+
+    return PadHints(
+      hints: hints,
+      child: Focus(
       focusNode: _rootFocus,
       autofocus: true,
       onKeyEvent: _onKey,
@@ -345,13 +840,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         backgroundColor: Colors.black,
         body: MouseRegion(
           cursor: _controls ? SystemMouseCursors.basic : SystemMouseCursors.none,
-          onHover: (_) => _showControls(),
+          // Mouse movement shows the controls, but not while the controller is in use
+          // (so a resting pointer or the touchpad can't keep popping them up).
+          onHover: (_) {
+            if (!padActive.value) _showControls();
+          },
           child: Stack(children: [
             // The video itself, with no built-in controls.
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: () => _controls ? _hideControls() : _showControls(focusPlay: true),
+                // Double-click for full screen on PC only, so taps on the phone stay instant.
+                onDoubleTap: isDesktop ? toggleFullScreen : null,
                 child: Video(
                   controller: controller,
                   controls: NoVideoControls,
@@ -388,18 +889,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 child: AnimatedOpacity(
                   opacity: _controls ? 1 : 0,
                   duration: const Duration(milliseconds: 250),
-                  child: Stack(children: [
-                    _topBar(title, episodeLine),
-                    _bottomBar(),
-                  ]),
+                  // Once faded out, the controls are taken off screen entirely, so nothing
+                  // (the clock, the progress bar) keeps updating while you watch.
+                  onEnd: () {
+                    if (!_controls && _chrome && mounted) setState(() => _chrome = false);
+                  },
+                  child: _chrome
+                      ? Stack(children: [
+                          _topBar(title, episodeLine),
+                          _bottomBar(),
+                        ])
+                      : const SizedBox.shrink(),
                 ),
               ),
             ),
 
             if (_info) _infoBox(),
             if (_panel != _Panel.none) _trackPanel(),
+            if (_failure != null) _failureBox(),
           ]),
         ),
+      ),
       ),
     );
   }
@@ -441,7 +951,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           ),
         ),
         child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-          _iconButton(Icons.arrow_back_rounded, () => Navigator.of(context).maybePop(), label: 'Back'),
+          FocusLinks(
+            down: () => _go(_barFocus),
+            child: _iconButton(Icons.arrow_back_rounded, () => Navigator.of(context).maybePop(),
+                label: 'Back', focusNode: _backFocus),
+          ),
           const SizedBox(width: 24),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -464,13 +978,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
       left: 0,
       right: 0,
       bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(56, 100, 56, 40),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.bottomCenter,
-            end: Alignment.topCenter,
-            colors: [Colors.black.withOpacity(0.85), Colors.black.withOpacity(0)],
+      child: ValueListenableBuilder<bool>(
+        valueListenable: padActive,
+        // With a controller, the buttons sit a little higher to leave room for the legend.
+        builder: (context, pad, child) => DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+              colors: [Colors.black.withOpacity(0.85), Colors.black.withOpacity(0)],
+            ),
+          ),
+          child: AnimatedPadding(
+            duration: const Duration(milliseconds: 200),
+            padding: EdgeInsets.fromLTRB(56, 100, 56, pad ? 100 : 40),
+            child: child,
           ),
         ),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -486,15 +1008,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
               final endsText =
                   '${endsAt.hour.toString().padLeft(2, '0')}:${endsAt.minute.toString().padLeft(2, '0')}';
               return Column(children: [
-                _ProgressBar(
+                FocusLinks(
+                  up: () => _go(_backFocus),
+                  down: () => _go(_playFocus),
+                  child: _ProgressBar(
+                  focusNode: _barFocus,
                   position: pos,
                   duration: dur,
                   buffered: player.state.buffer,
                   onSeek: (to) {
-                    player.seek(to);
+                    _lastSeek = DateTime.now();
+                    final room = _room;
+                    if (room != null) {
+                      room.seek(to.inMicroseconds / 1e6);
+                    } else {
+                      player.seek(to);
+                    }
                     _showControls();
                   },
                   onKeySkip: (forward) => _skip(forward ? _forward : -_back),
+                ),
                 ),
                 const SizedBox(height: 12),
                 Row(children: [
@@ -508,7 +1041,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
             },
           ),
           const SizedBox(height: 10),
-          SizedBox(
+          FocusLinks(
+            up: () => _go(_barFocus),
+            down: () => true, // nothing below the buttons
+            child: SizedBox(
             height: 64,
             child: Stack(alignment: Alignment.center, children: [
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -532,14 +1068,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
               Align(
                 alignment: Alignment.centerRight,
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  _iconButton(Icons.tune_rounded, () => _openPanel(_Panel.playback), label: 'Playback'),
+                  const SizedBox(width: 12),
                   _iconButton(Icons.graphic_eq_rounded, () => _openPanel(_Panel.audio), label: 'Audio'),
                   const SizedBox(width: 12),
                   _iconButton(Icons.closed_caption_outlined, () => _openPanel(_Panel.subtitles), label: 'Subtitles'),
                   const SizedBox(width: 12),
                   _iconButton(Icons.info_outline_rounded, _toggleInfo, label: 'Playback info'),
+                  if (isDesktop) ...[
+                    const SizedBox(width: 12),
+                    ValueListenableBuilder<bool>(
+                      valueListenable: fullScreen,
+                      builder: (_, full, __) => _iconButton(
+                        full ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+                        toggleFullScreen,
+                        label: 'Full screen',
+                      ),
+                    ),
+                  ],
                 ]),
               ),
             ]),
+          ),
           ),
         ]),
       ),
@@ -551,12 +1101,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       top: 150,
       right: 56,
       child: IgnorePointer(
-        child: Container(
+        child: Frost(
+          radius: 14,
           padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
-          decoration: BoxDecoration(
-            color: _bg.withOpacity(0.82),
-            borderRadius: BorderRadius.circular(14),
-          ),
           child: Text(_stats.isEmpty ? 'Reading…' : _stats, style: _body(17, color: _soft).copyWith(height: 1.6)),
         ),
       ),
@@ -687,12 +1234,51 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  String _trackLabel(String id, String? title, String? language) {
+  // Readable track names: "Japanese · AAC · Stereo", "English · Dolby TrueHD + Dolby Atmos · 7.1".
+  // mpv numbers each kind of track 1, 2, 3… in file order, the same order Jellyfin lists them,
+  // so Jellyfin's description of the same track is used when it has one.
+  String _trackLabel(String id, String? title, String? language, {required String type}) {
     if (id == 'auto') return 'Automatic';
     if (id == 'no') return 'Off';
-    final label = [language, title].where((s) => s != null && s.isNotEmpty).join(' · ');
+    final n = int.tryParse(id);
+    if (n != null && n > 0) {
+      final streams = ((widget.item['MediaStreams'] as List?) ?? [])
+          .where((s) => s['Type'] == type && s['IsExternal'] != true)
+          .toList();
+      if (n <= streams.length) {
+        final display = (streams[n - 1]['DisplayTitle'] ?? '').toString();
+        if (display.isNotEmpty) {
+          return display.split(' - ').where((p) => p.trim() != 'Default').join(' · ');
+        }
+      }
+    }
+    final label = [_languageName(language), title].where((s) => s != null && s.isNotEmpty).join(' · ');
     return label.isEmpty ? 'Track $id' : label;
   }
+
+  // The file's own streams of one kind (Audio, Subtitle), as Jellyfin lists them.
+  List<dynamic> _streams(String type) =>
+      ((widget.item['MediaStreams'] as List?) ?? []).where((s) => s['Type'] == type).toList();
+
+  String _streamLabel(dynamic s) {
+    final display = (s['DisplayTitle'] ?? '').toString();
+    if (display.isNotEmpty) return display.split(' - ').where((p) => p.trim() != 'Default').join(' · ');
+    return _languageName(s['Language']?.toString()) ?? 'Track ${s['Index']}';
+  }
+
+  static const _languages = {
+    'eng': 'English', 'en': 'English', 'jpn': 'Japanese', 'ja': 'Japanese', 'fre': 'French',
+    'fra': 'French', 'fr': 'French', 'spa': 'Spanish', 'es': 'Spanish', 'ger': 'German',
+    'deu': 'German', 'de': 'German', 'ita': 'Italian', 'it': 'Italian', 'por': 'Portuguese',
+    'pt': 'Portuguese', 'rus': 'Russian', 'ru': 'Russian', 'kor': 'Korean', 'ko': 'Korean',
+    'chi': 'Chinese', 'zho': 'Chinese', 'zh': 'Chinese', 'ara': 'Arabic', 'ar': 'Arabic',
+    'hin': 'Hindi', 'dut': 'Dutch', 'nld': 'Dutch', 'swe': 'Swedish', 'nor': 'Norwegian',
+    'dan': 'Danish', 'fin': 'Finnish', 'pol': 'Polish', 'tur': 'Turkish', 'tha': 'Thai',
+    'vie': 'Vietnamese', 'ind': 'Indonesian', 'heb': 'Hebrew', 'gre': 'Greek', 'ell': 'Greek',
+    'cze': 'Czech', 'ces': 'Czech', 'hun': 'Hungarian', 'ukr': 'Ukrainian', 'und': 'Unknown language',
+  };
+
+  String? _languageName(String? code) => code == null ? null : (_languages[code.toLowerCase()] ?? code);
 
   Widget _trackPanel() {
     final rows = <Widget>[];
@@ -728,16 +1314,47 @@ class _PlayerScreenState extends State<PlayerScreen> {
       first = false;
     }
 
-    if (_panel == _Panel.audio) {
+    if (_panel == _Panel.playback) {
+      // Original file or the server's version (see "Original file or the server's version").
+      add('Automatic', _mode == 'auto', () => _setMode('auto'));
+      add('Original file · best quality', _mode == 'original', () => _setMode('original'));
+      add('Converted by the server · smoothest', _mode == 'server', () => _setMode('server'));
+      rows.add(Padding(
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
+        child: Text(
+          _server
+              ? 'Now playing the version your server converts on the NAS.'
+              : 'Now playing the original file, straight from the NAS.',
+          style: _body(17, color: _muted).copyWith(height: 1.4),
+        ),
+      ));
+    } else if (_server && _panel == _Panel.audio) {
+      // The server's version: the file's own audio tracks; the server switches to the one picked.
+      final audio = _streams('Audio');
+      final current = _serverAudio ?? (audio.firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index']);
+      for (final a in audio) {
+        final index = (a['Index'] ?? -1) as int;
+        add(_streamLabel(a), index == current, () => _chooseServerAudio(index));
+      }
+    } else if (_server && _panel == _Panel.subtitles) {
+      add('Off', _serverSub == null && _serverTextSub == null, () => _chooseServerSubtitle(null));
+      for (final st in _streams('Subtitle')) {
+        final index = (st['Index'] ?? -1) as int;
+        final text = st['IsTextSubtitleStream'] == true;
+        add('${_streamLabel(st)}${text ? '' : ' · drawn in by the server'}',
+            index == _serverSub || index == _serverTextSub, () => _chooseServerSubtitle(st));
+      }
+      rows.addAll(_styleSection());
+    } else if (_panel == _Panel.audio) {
       final current = player.state.track.audio;
       for (final t in player.state.tracks.audio) {
         if (t.id == 'no') continue;
-        add(_trackLabel(t.id, t.title, t.language), t == current, () => player.setAudioTrack(t));
+        add(_trackLabel(t.id, t.title, t.language, type: 'Audio'), t == current, () => player.setAudioTrack(t));
       }
     } else {
       final current = player.state.track.subtitle;
       for (final t in player.state.tracks.subtitle) {
-        add(_trackLabel(t.id, t.title, t.language), t == current, () => _setSubtitle(t));
+        add(_trackLabel(t.id, t.title, t.language, type: 'Subtitle'), t == current, () => _setSubtitle(t));
       }
       // Subtitles stored as separate files are not inside the video, so add them from Jellyfin.
       final external = ((widget.item['MediaStreams'] as List?) ?? [])
@@ -760,19 +1377,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
         Positioned.fill(
           child: GestureDetector(
             onTap: _closePanel,
-            child: Container(color: Colors.black.withOpacity(0.35)),
+            child: Container(color: Colors.black.withOpacity(0.12)),
           ),
         ),
+        // A floating glass card, like the player's buttons.
         Positioned(
-          top: 0,
-          bottom: 0,
-          right: 0,
+          top: 32,
+          bottom: 32,
+          right: 32,
           width: 460,
-          child: Container(
-            color: _bg.withOpacity(0.94),
-            padding: const EdgeInsets.fromLTRB(28, 48, 28, 28),
+          child: Frost(
+            radius: 28,
+            padding: const EdgeInsets.fromLTRB(24, 32, 24, 20),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(_panel == _Panel.audio ? 'Audio' : 'Subtitles', style: _display(28)),
+              Text(
+                  _panel == _Panel.playback
+                      ? 'Playback'
+                      : _panel == _Panel.audio
+                          ? 'Audio'
+                          : 'Subtitles',
+                  style: _display(28)),
               const SizedBox(height: 24),
               // Its own focus scope: arrow keys stay inside the panel while it's open.
               Expanded(
@@ -830,7 +1454,7 @@ class _NodeFocusableState extends State<_NodeFocusable> {
       },
       onFocusChange: (f) => setState(() => _focused = f),
       onShowHoverHighlight: (h) {
-        if (h && !widget.node.hasFocus) widget.node.requestFocus();
+        if (h && !widget.node.hasFocus && !padActive.value) widget.node.requestFocus();
       },
       child: GestureDetector(onTap: widget.onSelect, child: widget.builder(_focused)),
     );
@@ -841,6 +1465,7 @@ class _NodeFocusableState extends State<_NodeFocusable> {
 
 class _ProgressBar extends StatefulWidget {
   const _ProgressBar({
+    this.focusNode,
     required this.position,
     required this.duration,
     required this.buffered,
@@ -848,6 +1473,7 @@ class _ProgressBar extends StatefulWidget {
     required this.onKeySkip,
   });
 
+  final FocusNode? focusNode;
   final Duration position;
   final Duration duration;
   final Duration buffered;
@@ -879,6 +1505,7 @@ class _ProgressBarState extends State<_ProgressBar> {
     final buffered = _fraction(widget.buffered);
 
     return Focus(
+      focusNode: widget.focusNode,
       onFocusChange: (f) => setState(() => _focused = f),
       onKeyEvent: (_, event) {
         if (event is! KeyDownEvent && event is! KeyRepeatEvent) return KeyEventResult.ignored;

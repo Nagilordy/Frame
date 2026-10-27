@@ -14,7 +14,9 @@ dependencies:
   media_kit_video: ^2.0.1
   media_kit_libs_video: ^1.0.5
   shared_preferences: ^2.3.2
-  google_fonts: ^6.2.1
+  window_manager: ^0.4.3
+  gamepads: ^0.1.13
+  path_provider: ^2.1.4
 
 # Community fix for GPU video rendering on Linux with recent Flutter
 # (media-kit issue #1404, pull request #1466). Remove once it ships in a release.
@@ -27,3 +29,26 @@ dependency_overrides:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/mpv/frame_ui.lua
+  # Fonts are built into the app (no download on first launch, no flash of a fallback font).
+  # Both are free under the SIL Open Font License; the licenses sit next to the files.
+  fonts:
+    - family: Hanken Grotesk
+      fonts:
+        - asset: assets/fonts/HankenGrotesk-400.ttf
+          weight: 400
+        - asset: assets/fonts/HankenGrotesk-500.ttf
+          weight: 500
+        - asset: assets/fonts/HankenGrotesk-600.ttf
+          weight: 600
+        - asset: assets/fonts/HankenGrotesk-700.ttf
+          weight: 700
+        - asset: assets/fonts/HankenGrotesk-800.ttf
+          weight: 800
+    - family: Sora
+      fonts:
+        - asset: assets/fonts/Sora-600.ttf
+          weight: 600
+        - asset: assets/fonts/Sora-700.ttf
+          weight: 700

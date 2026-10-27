@@ -3,15 +3,20 @@
 // Works with arrow keys + Enter (and a controller mapped to them), or the mouse.
 
 import 'dart:async';
-import 'dart:ui' as ui;
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'main.dart';
 import 'library.dart';
-import 'player.dart';
+import 'native_player.dart' show playerScreen;
+import 'images.dart';
+import 'profiles.dart' show ProfileChip, ProfileStore, WhoScreen, showProfileMenu;
+import 'syncplay.dart' show TogetherPill, startWatchTogether, watchTogetherButton;
 import 'ui.dart';
 
 // ---------- Look (shared with the other screens, see ui.dart) ----------
@@ -24,7 +29,9 @@ const _placeholder = kPlaceholder;
 
 int _px(double designPixels) => tvPx(designPixels);
 // Loaded a bit wider than the design, so wide windows don't stretch it soft.
-int get _backdropWidth => tvPx(2560).clamp(1280, 3840);
+// The backdrop always sits under dark shading, so it never needs more than 2560 pixels wide,
+// even on a 4K screen. That's under half the pixels of a full 4K picture to load and draw.
+int get _backdropWidth => sizeBucket(tvPx(1920)).clamp(1280, 2560);
 
 TextStyle _body(double size, {FontWeight weight = FontWeight.w500, Color color = kFg, double? height}) =>
     tvBody(size, weight: weight, color: color, height: height);
@@ -49,40 +56,139 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   List<dynamic> _resume = [];
   List<dynamic> _latest = [];
-  dynamic _featured;
+  // What's selected right now: its backdrop and title fill the screen. Kept in its own
+  // notifier so moving between cards redraws only the backdrop and title, not both rows.
+  final _featuredN = ValueNotifier<dynamic>(null);
+  dynamic get _featured => _featuredN.value;
+  set _featured(dynamic item) => _featuredN.value = item;
   bool _loading = true;
 
   Jellyfin get jf => widget.jf;
 
+  String? _serverName; // shown under your name, top right
+  final _profileNode = namedNode('Home: Profile');
+
   @override
   void initState() {
     super.initState();
+    _loadSaved();
     _load();
+    ProfileStore.serverName().then((n) {
+      if (mounted) setState(() => _serverName = n);
+    }, onError: (_) {});
+  }
+
+  // The last home screen is saved on disk, so the app opens straight onto your rows (with
+  // artwork from the disk cache) and refreshes them a moment later.
+  Future<File> _savedFile() async => File('${(await getApplicationSupportDirectory()).path}/home.json');
+
+  Future<void> _loadSaved() async {
+    try {
+      final file = await _savedFile();
+      if (!await file.exists()) return;
+      final data = jsonDecode(await file.readAsString());
+      // Only if it's for this server and user, and the fresh answer hasn't arrived yet.
+      if (data['server'] != jf.server || data['userId'] != jf.userId) return;
+      if (!mounted || !_loading) return;
+      setState(() {
+        _resume = data['resume'] as List;
+        _latest = data['latest'] as List;
+        _libraries = data['views'] as List;
+        _featured = _resume.isNotEmpty ? _resume.first : (_latest.isNotEmpty ? _latest.first : null);
+        _loading = false;
+      });
+    } catch (_) {
+      // No saved screen, or it can't be read: just wait for the server.
+    }
+  }
+
+  Future<void> _save(List<dynamic> resume, List<dynamic> latest, List<dynamic> views) async {
+    try {
+      final file = await _savedFile();
+      final tmp = File('${file.path}.${DateTime.now().microsecondsSinceEpoch}.part');
+      await tmp.writeAsString(jsonEncode(
+          {'server': jf.server, 'userId': jf.userId, 'resume': resume, 'latest': latest, 'views': views}));
+      await tmp.rename(file.path);
+    } catch (_) {}
   }
 
   List<dynamic> _libraries = [];
 
+  String? _error;
+  int _retriesLeft = 3;
+
   Future<void> _load() async {
-    final results = await Future.wait([
-      jf.resume().catchError((_) => <dynamic>[]),
-      jf.latest().catchError((_) => <dynamic>[]),
-      jf.views().catchError((_) => <dynamic>[]),
+    Object? failure;
+    // A list that fails to load keeps what it showed before (null = failed), instead of
+    // quietly turning empty. The reason is printed in the terminal.
+    Future<List<dynamic>?> attempt(String name, Future<List<dynamic>> f) => f.then<List<dynamic>?>((v) => v,
+            onError: (Object e) {
+          failure = e;
+          debugPrint('Home: $name failed to load: $e');
+          return null;
+        });
+    final loaded = await Future.wait([
+      attempt('Continue watching', jf.resume()),
+      attempt('Recently added', jf.latest()),
+      attempt('Libraries (tabs)', jf.views()),
     ]);
     if (!mounted) return;
+    final results = [loaded[0] ?? _resume, loaded[1] ?? _latest, loaded[2] ?? _libraries];
+    final nothing = loaded.every((r) => r == null || r.isEmpty);
     setState(() {
+      // Only a real failure is an error (an empty library is not). If a refresh fails while
+      // the screen already shows something, keep showing it.
+      if (nothing && failure != null) {
+        final text = errorText(failure!);
+        // An expired login always shows (with Sign in), even over a saved screen.
+        if ((_resume.isEmpty && _latest.isEmpty) || text.contains('Sign in again')) _error = text;
+        return;
+      }
+      _error = null;
       _resume = results[0];
       _latest = results[1];
       _libraries = results[2];
-      _featured = _resume.isNotEmpty ? _resume.first : (_latest.isNotEmpty ? _latest.first : null);
+      // Keep the artwork of what's selected when coming back from a video.
+      final keep = _featured == null
+          ? null
+          : [..._resume, ..._latest].cast<dynamic>().firstWhere((i) => i['Id'] == _featured['Id'], orElse: () => null);
+      _featured = keep ?? (_resume.isNotEmpty ? _resume.first : (_latest.isNotEmpty ? _latest.first : null));
       _loading = false;
     });
+    if (failure == null) _save(results[0], results[1], results[2]);
+    // Something failed but the rest loaded: try the missing part again in a few seconds.
+    if (failure != null && !nothing && _retriesLeft > 0) {
+      _retriesLeft--;
+      Timer(const Duration(seconds: 5), () {
+        if (mounted) _load();
+      });
+    }
+    if (failure == null) _retriesLeft = 3;
+  }
+
+  // The saved login no longer works: forget it and go back to Who's watching.
+  Future<void> _signInAgain() async {
+    try {
+      if (jf.userId != null) await ProfileStore.forget(jf.userId!);
+    } catch (_) {}
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => WhoScreen(server: jf.server)), (_) => false);
+  }
+
+  void _retry() {
+    setState(() {
+      _error = null;
+      _loading = true;
+    });
+    _load();
   }
 
   // Movies and episodes play; a show opens its show page. Coming back refreshes Continue Watching.
   Future<void> _open(dynamic item) async {
     if (item == null) return;
     final Widget screen =
-        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : PlayerScreen(jf: jf, item: item);
+        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : playerScreen(jf, item);
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
     _load();
   }
@@ -93,13 +199,19 @@ class _HomeScreenState extends State<HomeScreen> {
   void _feature(dynamic item) {
     _featureTimer?.cancel();
     _featureTimer = Timer(const Duration(milliseconds: 160), () {
-      if (mounted) setState(() => _featured = item);
+      if (!mounted) return;
+      _featured = item;
+      // A show selected for a moment: fetch its page now, so opening it is instant.
+      if (item?['Type'] == 'Series') jf.prefetchShow(item);
     });
   }
 
   @override
   void dispose() {
     _featureTimer?.cancel();
+    _profileNode.dispose();
+    _playNode.dispose();
+    _featuredN.dispose();
     super.dispose();
   }
 
@@ -121,7 +233,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // Which row is at the top of the rows area, for the mouse wheel.
-  final _rowKeys = [GlobalKey(), GlobalKey()];
+  final _rowKeys = [GlobalKey<_MediaRowState>(), GlobalKey<_MediaRowState>()];
+
+  // Fixed Up / Down jumps for the controller: tabs ↕ Play ↕ row 1 ↕ row 2.
+  final _playNode = namedNode('Home: Play');
+
+  // Focuses the first row with something in it, starting at [from] and going in [step].
+  bool _focusRow(int from, int step) {
+    for (var i = from; i >= 0 && i < _rowKeys.length; i += step) {
+      final row = _rowKeys[i].currentState;
+      if (row != null && row.focusRow()) return true;
+    }
+    return false;
+  }
   int _rowIndex = 0;
   DateTime _lastWheel = DateTime(0);
 
@@ -175,11 +299,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _canvas(BuildContext context) {
-    final featured = _featured;
     const move = Duration(milliseconds: 420);
     const curve = Curves.easeOutCubic;
-    // The mouse wheel works anywhere on the screen.
-    return Listener(
+    // The mouse wheel works anywhere on the screen. Triangle / Y opens your profile menu.
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: (_, e) {
+        if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.contextMenu) {
+          showProfileMenu(context, jf);
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Listener(
       onPointerSignal: (event) {
         if (event is PointerScrollEvent && !HardwareKeyboard.instance.isShiftPressed) {
           _wheelToRow(event.scrollDelta.dy > 0 ? 1 : -1);
@@ -191,104 +324,71 @@ class _HomeScreenState extends State<HomeScreen> {
         // Its own layer, so moving focus around doesn't redraw the big backdrop.
         Positioned.fill(
           child: RepaintBoundary(
-            child: AnimatedSwitcher(
+            child: ValueListenableBuilder<dynamic>(
+              valueListenable: _featuredN,
+              builder: (context, featured, _) => AnimatedSwitcher(
               duration: const Duration(milliseconds: 450),
               child: featured == null
                   ? const ColoredBox(key: ValueKey('none'), color: _bg)
-                  : Image.network(
+                  // Keeps the top of the artwork (faces, titles); trims the bottom, which sits
+                  // behind the rows and the dark fade anyway.
+                  : netImage(
                       jf.backdropFor(featured, maxWidth: _backdropWidth),
                       key: ValueKey(jf.backdropFor(featured, maxWidth: _backdropWidth)),
                       width: double.infinity,
                       height: double.infinity,
-                      // Decode at the size it's shown, not the file's full size.
                       cacheWidth: _backdropWidth,
                       fit: BoxFit.cover,
-                      // Keep the top of the artwork (faces, titles); trim the bottom, which sits
-                      // behind the rows and the dark fade anyway.
                       alignment: Alignment.topCenter,
                       gaplessPlayback: true,
                       errorBuilder: (_, __, ___) => const ColoredBox(color: _placeholder),
                     ),
             ),
-          ),
-        ),
-        // Darken the left side and the bottom so text stays readable on any artwork.
-        Positioned.fill(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                // A softer shade that eases out gradually, so it reads as a shadow, not a bar.
-                colors: [
-                  _bg.withOpacity(0.8),
-                  _bg.withOpacity(0.62),
-                  _bg.withOpacity(0.35),
-                  _bg.withOpacity(0.12),
-                  _bg.withOpacity(0),
-                ],
-                stops: const [0, 0.22, 0.42, 0.6, 0.75],
-              ),
             ),
           ),
         ),
-        // Light fade at the top and bottom edges, always on, so the peeking rows stay readable.
+        // Shading over the backdrop: one small picture stretched, made once (see ShadeOverlay).
+        const Positioned.fill(child: ShadeOverlay(shades: [kShadeLeft, kShadeTopBottom])),
+        // Strong fade under the rows, faded in only when the rows are up (see FadingShade).
         Positioned.fill(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  _bg.withOpacity(0.35),
-                  _bg.withOpacity(0),
-                  _bg.withOpacity(0),
-                  _bg.withOpacity(0.75),
-                ],
-                stops: const [0, 0.18, 0.72, 1],
-              ),
-            ),
+          child: FadingShade(
+            visible: !_hero,
+            duration: move,
+            curve: curve,
+            alphas: const [0, 0, 0.88, 1],
+            stops: const [0, 0.38, 0.6, 0.8],
           ),
         ),
-        // Strong fade under the rows, faded in only when the rows are up.
-        Positioned.fill(
-          child: IgnorePointer(
-            child: AnimatedOpacity(
-              opacity: _hero ? 0 : 1,
-              duration: move,
-              curve: curve,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      _bg.withOpacity(0),
-                      _bg.withOpacity(0),
-                      _bg.withOpacity(0.88),
-                      _bg,
-                    ],
-                    stops: const [0, 0.38, 0.6, 0.8],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
+        // Moving focus with the keyboard or controller raises and lowers the rows; the mouse
+        // never does (it would move the screen under the pointer). The wheel does that instead.
         Positioned(
           left: 120,
           top: 52,
-          child: Focus(
-            canRequestFocus: false,
-            skipTraversal: true,
-            onFocusChange: (f) {
-              if (f) _setHero(true);
-            },
-            child: _nav(context),
+          child: FocusLinks(down: () => focusOn(_playNode) || _focusRow(0, 1), child: _nav(context)),
+        ),
+        // You, top right: avatar, name and server. Select it (or Triangle / Y anywhere) for the menu.
+        Positioned(
+          right: 120,
+          top: 48,
+          child: FocusLinks(
+            down: () => focusOn(_playNode) || _focusRow(0, 1),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              // Shows only while someone has a Watch together room open on this server.
+              TogetherPill(jf: jf),
+              ProfileChip(jf: jf, serverName: _serverName, focusNode: _profileNode),
+            ]),
           ),
         ),
-        if (_loading)
+        if (_error != null)
+          Positioned(
+            left: 120,
+            top: 200,
+            child: _error!.contains('Sign in again')
+                ? TvError(message: _error!, onRetry: _signInAgain, label: 'Sign in')
+                : TvError(message: _error!, onRetry: _retry),
+          )
+        else if (_loading)
           Positioned(left: 120, top: 200, child: Text('Loading your library…', style: _body(28, color: _muted)))
-        else if (featured == null)
-          Positioned(left: 120, top: 200, child: Text('Nothing here yet.', style: _body(28, color: _muted)))
         else
           // The title, summary and Play button sit low over the full artwork, and move up
           // out of the way when the rows rise.
@@ -298,13 +398,13 @@ class _HomeScreenState extends State<HomeScreen> {
             left: 120,
             top: _hero ? 470 : 150,
             width: 1000,
-            child: Focus(
-              canRequestFocus: false,
-              skipTraversal: true,
-              onFocusChange: (f) {
-                if (f) _setHero(true);
-              },
-              child: RepaintBoundary(child: _heroBlock(featured)),
+            child: RepaintBoundary(
+              child: ValueListenableBuilder<dynamic>(
+                valueListenable: _featuredN,
+                builder: (context, featured, _) => featured == null
+                    ? Text('Nothing here yet.', style: _body(28, color: _muted))
+                    : _heroBlock(featured),
+              ),
             ),
           ),
         // Rows live in their own scrolling area: they peek in at the bottom over the full artwork,
@@ -316,41 +416,52 @@ class _HomeScreenState extends State<HomeScreen> {
           right: 0,
           top: _hero ? 880 : 540,
           bottom: 0,
-          child: Focus(
-            canRequestFocus: false,
-            skipTraversal: true,
-            onFocusChange: (f) {
-              if (f) _setHero(false);
-            },
-            child: SingleChildScrollView(
+          child: _error != null ? const SizedBox.shrink() : SingleChildScrollView(
               physics: const NeverScrollableScrollPhysics(),
-              padding: const EdgeInsets.only(bottom: 280),
+              // Only a small margin under the last row: moving down to it stops when it reaches
+              // the bottom of the screen (the row above stays partly in view), instead of
+              // sliding it to the top and leaving an empty black band below.
+              padding: const EdgeInsets.only(bottom: 40),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _MediaRow(
+                  FocusLinks(
+                    up: () => focusOn(_playNode),
+                    down: () => _focusRow(1, 1) || true,
+                    child: _MediaRow(
                       key: _rowKeys[0],
                       title: 'Continue watching',
                       items: _resume,
                       jf: jf,
                       onSelect: _open,
                       onFocus: _feature,
-                      onActivate: () => _rowIndex = 0),
+                      onActivate: () {
+                        _rowIndex = 0;
+                        _setHero(false);
+                      }),
+                  ),
                   const SizedBox(height: 28),
-                  _MediaRow(
+                  FocusLinks(
+                    up: () => _focusRow(0, -1) || focusOn(_playNode),
+                    down: () => true, // last row: nothing below
+                    child: _MediaRow(
                       key: _rowKeys[1],
                       title: 'Recently added',
                       items: _latest,
                       jf: jf,
                       onSelect: _open,
                       onFocus: _feature,
-                      onActivate: () => _rowIndex = 1),
+                      onActivate: () {
+                        _rowIndex = 1;
+                        _setHero(false);
+                      }),
+                  ),
                 ],
               ),
             ),
-          ),
         ),
       ],
+      ),
       ),
     );
   }
@@ -361,6 +472,9 @@ class _HomeScreenState extends State<HomeScreen> {
       libraries: _libraries,
       currentId: null,
       onHome: () {},
+      onFocus: (viaMouse) {
+        if (!viaMouse) _setHero(true);
+      },
       onLibrary: (lib) async {
         await Navigator.of(context).push(MaterialPageRoute(
             builder: (_) => LibraryScreen(jf: jf, libraries: _libraries, library: lib)));
@@ -378,8 +492,13 @@ class _HomeScreenState extends State<HomeScreen> {
     final progress = _progress(item);
     final label = item['Type'] == 'Series' ? 'Open' : (progress > 0 ? 'Resume' : 'Play');
 
-    return AnimatedSwitcher(
+    // Only the text cross-fades between titles. The Play button stays the same button, so
+    // the controller can always jump back to it.
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
+      layoutBuilder: (current, previous) =>
+          Stack(alignment: Alignment.topLeft, children: [...previous, if (current != null) current]),
       child: Column(
         key: ValueKey(item['Id']),
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -394,26 +513,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   // A soft dark glow behind the logo keeps dark logos readable on busy artwork.
                   // It's in its own layer, so the blur is drawn once per title, not every frame.
                   : Stack(children: [
-                      RepaintBoundary(
-                        child: ImageFiltered(
-                          imageFilter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-                          child: ColorFiltered(
-                            colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.75), BlendMode.srcIn),
-                            child: Image.network(logo,
-                                height: 120,
-                                cacheHeight: _px(120),
-                                fit: BoxFit.contain,
-                                alignment: Alignment.bottomLeft,
-                                errorBuilder: (_, __, ___) => const SizedBox.shrink()),
-                          ),
-                        ),
-                      ),
-                      Image.network(logo,
-                          height: 120,
-                          cacheHeight: _px(120),
-                          fit: BoxFit.contain,
-                          alignment: Alignment.bottomLeft,
-                          errorBuilder: (_, __, ___) => title),
+                      // Blurred once per title and kept as a picture (see BakedGlow), instead
+                      // of being blurred again on every frame.
+                      Positioned.fill(child: BakedGlow(url: logo, cacheHeight: _px(120))),
+                      LogoImage(url: logo, height: 120, cacheHeight: _px(120), fallback: title),
                     ]),
             ),
           ),
@@ -429,17 +532,26 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: _body(24, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.45)),
             ),
           ],
+        ],
+      ),
+      ),
           const SizedBox(height: 22),
-          Row(children: [
+          FocusLinks(
+            down: () => _focusRow(0, 1),
+            child: Row(children: [
             Focusable(
               autofocus: true,
+              focusNode: _playNode,
               onSelect: () => _open(_featured),
+              onFocus: (viaMouse) {
+                if (!viaMouse) _setHero(true);
+              },
               builder: (f) => AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
                 height: 64,
                 padding: const EdgeInsets.only(left: 26, right: 34),
                 decoration: BoxDecoration(
-                  color: f ? _fg : _fg.withOpacity(0.14),
+                  color: f ? _fg : kPillFill,
                   borderRadius: BorderRadius.circular(999),
                   boxShadow: f ? [BoxShadow(color: _fg.withOpacity(0.22), spreadRadius: 5)] : [],
                 ),
@@ -450,6 +562,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 ]),
               ),
             ),
+            if (item['Type'] != 'Series') ...[
+              const SizedBox(width: 16),
+              Focusable(
+                onSelect: () => startWatchTogether(context, jf, item),
+                onFocus: (viaMouse) {
+                  if (!viaMouse) _setHero(true);
+                },
+                builder: watchTogetherButton,
+              ),
+            ],
             if (progress > 0) ...[
               const SizedBox(width: 26),
               Container(
@@ -467,9 +589,8 @@ class _HomeScreenState extends State<HomeScreen> {
               Text('${_minutesLeft(item)} min left', style: _body(24, color: _muted)),
             ],
           ]),
-        ],
-      ),
-    );
+          ),
+    ]);
   }
 }
 
@@ -504,13 +625,23 @@ class _MediaRowState extends State<_MediaRow> {
 
   final _scroll = ScrollController();
   bool _hovering = false;
+  late final _nodes = FocusNodeList('Home: ${widget.title} card');
+  int _last = 0; // the card that had focus last, so coming back to this row returns to it
 
   List<dynamic> get items => widget.items;
   Jellyfin get jf => widget.jf;
 
+  // Called when the controller moves into this row from above or below.
+  bool focusRow() {
+    if (items.isEmpty) return false;
+    final i = _last < items.length ? _last : 0;
+    return focusOn(_nodes[i]) || _nodes.focusFirstVisible();
+  }
+
   @override
   void dispose() {
     _scroll.dispose();
+    _nodes.dispose();
     super.dispose();
   }
 
@@ -596,7 +727,7 @@ class _MediaRowState extends State<_MediaRow> {
                           padding: const EdgeInsets.fromLTRB(120, 16, 120, 0),
                           itemCount: items.length,
                           separatorBuilder: (_, __) => const SizedBox(width: 30),
-                          itemBuilder: (_, i) => _card(items[i]),
+                          itemBuilder: (_, i) => _card(items[i], i),
                         ),
                       ),
                     ),
@@ -620,7 +751,7 @@ class _MediaRowState extends State<_MediaRow> {
     );
   }
 
-  Widget _card(dynamic item) {
+  Widget _card(dynamic item, int index) {
     final progress = _progress(item);
     final episode = item['Type'] == 'Episode'
         ? [
@@ -629,8 +760,10 @@ class _MediaRowState extends State<_MediaRow> {
           ].join(' · ')
         : '';
     return Focusable(
+      focusNode: _nodes[index],
       onSelect: () => widget.onSelect(item),
       onFocus: (viaMouse) {
+        _last = index;
         widget.onFocus(item);
         if (!viaMouse) _bringRowIntoView();
       },
@@ -648,6 +781,8 @@ class _MediaRowState extends State<_MediaRow> {
                 width: cardW,
                 height: cardH,
                 decoration: BoxDecoration(
+                  // Shown while the picture loads, so a card never looks missing.
+                  color: _placeholder,
                   borderRadius: BorderRadius.circular(12),
                   boxShadow: f
                       ? [
@@ -659,8 +794,8 @@ class _MediaRowState extends State<_MediaRow> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(12),
                   child: Stack(fit: StackFit.expand, children: [
-                    Image.network(
-                      jf.thumbFor(item),
+                    netImage(
+                      jf.thumbFor(item, maxWidth: sizeBucket(_px(cardW * 1.08))),
                       // Decode at the size it's shown on this screen (focused size included).
                       cacheWidth: _px(cardW * 1.08),
                       fit: BoxFit.cover,
@@ -702,23 +837,6 @@ class _MediaRowState extends State<_MediaRow> {
           ],
         ),
       ),
-    );
-  }
-}
-
-// ---------- Plain list screens (Movies, Shows, episodes) until they get their own design ----------
-
-class _ListScreen extends StatelessWidget {
-  const _ListScreen({required this.title, required this.jf, required this.load});
-  final String title;
-  final Jellyfin jf;
-  final Future<List<dynamic>> Function() load;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text(title)),
-      body: ItemList(jf: jf, load: load),
     );
   }
 }
