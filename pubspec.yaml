@@ -1,0 +1,29 @@
+name: player_test
+description: Test app - connect to Jellyfin and play a file directly with mpv.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  media_kit: ^1.2.1
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.5
+  shared_preferences: ^2.3.2
+  google_fonts: ^6.2.1
+
+# Community fix for GPU video rendering on Linux with recent Flutter
+# (media-kit issue #1404, pull request #1466). Remove once it ships in a release.
+dependency_overrides:
+  media_kit_video:
+    git:
+      url: https://github.com/freeKC/media-kit.git
+      ref: fix-linux-egl
+      path: media_kit_video
+
+flutter:
+  uses-material-design: true
