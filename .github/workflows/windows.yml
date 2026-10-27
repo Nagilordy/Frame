@@ -1,0 +1,54 @@
+# Builds Frame for Windows and packs it into one installer, FrameSetup.exe.
+# Runs on GitHub's Windows machines: on every push to main, or by hand (Actions tab > Run).
+# The installer appears under the run's "Artifacts"; pushing a tag like v0.2 also attaches it
+# to a Release, which gives your friend a simple download link.
+
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Adds the Windows part of the project if it isn't in the repository yet.
+      - name: Windows project files
+        shell: pwsh
+        run: if (-not (Test-Path windows)) { flutter create --platforms=windows --project-name player_test . }
+
+      - name: Build
+        run: flutter build windows --release
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Make the installer
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { "0.1.$env:GITHUB_RUN_NUMBER" }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" installer\frame.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameSetup
+          path: installer\Output\FrameSetup.exe
+
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/FrameSetup.exe
