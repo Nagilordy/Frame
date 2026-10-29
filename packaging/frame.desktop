@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Frame
+Comment=Your Jellyfin library, couch-first
+Exec=player_test
+Icon=frame
+Categories=AudioVideo;Video;Player;
+Terminal=false
+StartupWMClass=com.example.player_test

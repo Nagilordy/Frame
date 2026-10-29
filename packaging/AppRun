@@ -1,0 +1,5 @@
+#!/bin/sh
+# Starts Frame from inside the AppImage, with its bundled libraries first in line.
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
+exec "$HERE/usr/bin/player_test" "$@"
