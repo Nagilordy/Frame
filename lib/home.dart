@@ -190,6 +190,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final Widget screen =
         item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : playerScreen(jf, item);
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
+    // Watched something from a show: its saved pages (next episode, progress) are out of date.
+    final series = item['Type'] == 'Series' ? item['Id'] : item['SeriesId'];
+    if (series != null) jf.forgetShow(series.toString());
     _load();
   }
 
@@ -308,6 +311,17 @@ class _HomeScreenState extends State<HomeScreen> {
       onKeyEvent: (_, e) {
         if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.contextMenu) {
           showProfileMenu(context, jf);
+          return KeyEventResult.handled;
+        }
+        // R2 / Page Down: the next tab (the first library).
+        if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.pageDown && _libraries.isNotEmpty) {
+          _openLibrary(_libraries.first);
+          return KeyEventResult.handled;
+        }
+        // Circle / B in the rows: back up to the artwork and Play, like a console's home.
+        if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.escape && !_hero) {
+          _setHero(true);
+          focusOn(_playNode);
           return KeyEventResult.handled;
         }
         return KeyEventResult.ignored;
@@ -475,12 +489,22 @@ class _HomeScreenState extends State<HomeScreen> {
       onFocus: (viaMouse) {
         if (!viaMouse) _setHero(true);
       },
-      onLibrary: (lib) async {
-        await Navigator.of(context).push(MaterialPageRoute(
-            builder: (_) => LibraryScreen(jf: jf, libraries: _libraries, library: lib)));
-        _load();
-      },
+      onLibrary: _openLibrary,
     );
+  }
+
+  Future<void> _openLibrary(dynamic lib) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => LibraryScreen(jf: jf, libraries: _libraries, library: lib)));
+    _load();
+    // Came back with L2 from another tab: if nothing on Home is selected, select Play.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final f = FocusManager.instance.primaryFocus;
+      if (mounted && (f == null || focusLabels[f] == null)) {
+        _setHero(true);
+        focusOn(_playNode);
+      }
+    });
   }
 
   Widget _heroBlock(dynamic item) {

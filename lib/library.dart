@@ -78,6 +78,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // Fixed jumps for the controller: tabs ↓ filter buttons ↓ grid, and Up from the top row
   // of the grid goes back to the filter buttons (Flutter's guess skipped them from the left).
   final _posterNodes = FocusNodeList('Library: Poster');
+  // Selected while the first posters load, so L2 / R2 and Back work straight away.
+  final _rootFocus = namedNode('Library: loading');
   int _focusedIndex = 0;
   Timer? _prefetchTimer;
 
@@ -104,6 +106,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _unwatchedChip.dispose();
     _fourKChip.dispose();
     _posterNodes.dispose();
+    _rootFocus.dispose();
     _prefetchTimer?.cancel();
     super.dispose();
   }
@@ -154,11 +157,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
         genre: _genre,
       );
       if (!mounted || gen != _generation) return;
+      final first = _items.isEmpty;
       setState(() {
         _items.addAll(page.items);
         _total = page.total;
         _firstLoad = false;
       });
+      // The first posters arrived: select the first one (unless you moved somewhere already).
+      if (first) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _rootFocus.hasPrimaryFocus) _focusGrid();
+        });
+      }
     } catch (e) {
       if (mounted && gen == _generation) {
         setState(() {
@@ -239,11 +249,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
+  // L2 / R2 (Page Up / Page Down): the tab to the left or right.
+  void _switchTab(int step) {
+    final i = widget.libraries.indexWhere((l) => l['Id'] == _libId);
+    final next = i + step;
+    if (next < 0) {
+      Navigator.of(context).popUntil((r) => r.isFirst); // left of the first library: Home
+    } else if (next < widget.libraries.length) {
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+          builder: (_) => LibraryScreen(jf: jf, libraries: widget.libraries, library: widget.libraries[next])));
+    }
+  }
+
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (_picker == _Picker.none &&
+        (event.logicalKey == LogicalKeyboardKey.pageUp || event.logicalKey == LogicalKeyboardKey.pageDown)) {
+      _switchTab(event.logicalKey == LogicalKeyboardKey.pageUp ? -1 : 1);
+      return KeyEventResult.handled;
+    }
     if (event.logicalKey == LogicalKeyboardKey.escape || event.logicalKey == LogicalKeyboardKey.backspace) {
       if (_picker != _Picker.none) {
         _closePicker();
+      } else if (_posterNodes.anyFocused && _grid.hasClients && _grid.offset > 1) {
+        // Deep in the grid: back to the top first (the filters), then Back again leaves.
+        _grid.animateTo(0, duration: const Duration(milliseconds: 380), curve: Curves.easeOutCubic);
+        focusOn(_lastChip ?? _sortChip);
       } else {
         Navigator.of(context).maybePop();
       }
@@ -268,6 +299,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final showRail = _sort.label == 'A–Z' && _total > 40;
 
     return Focus(
+      focusNode: _rootFocus,
+      autofocus: true,
       onKeyEvent: _onKey,
       child: Scaffold(
         backgroundColor: kBg,
@@ -884,6 +917,18 @@ class _ShowScreenState extends State<ShowScreen> {
     if (event is KeyDownEvent &&
         (event.logicalKey == LogicalKeyboardKey.escape || event.logicalKey == LogicalKeyboardKey.backspace)) {
       Navigator.of(context).maybePop();
+      return KeyEventResult.handled;
+    }
+    // L2 / R2 (Page Up / Page Down): previous or next season, with its tab selected.
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.pageUp || event.logicalKey == LogicalKeyboardKey.pageDown)) {
+      final next = _season + (event.logicalKey == LogicalKeyboardKey.pageUp ? -1 : 1);
+      if (next >= 0 && next < _seasons.length) {
+        _pickSeason(next);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) focusOn(_tabNodes[next]);
+        });
+      }
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;

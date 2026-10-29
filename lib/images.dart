@@ -3,7 +3,6 @@
 // few days are refreshed quietly in the background, so changed artwork shows up eventually.
 
 import 'dart:async';
-import 'dart:math' as math;
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -626,75 +625,8 @@ class ShadeOverlay extends StatelessWidget {
       child: RepaintBoundary(
         child: Stack(fit: StackFit.expand, children: [
           for (final s in shades) DecoratedBox(decoration: BoxDecoration(gradient: s)),
-          // A screen has only 256 steps of each colour, so a slow dark fade shows as stripes.
-          // A very faint grain on top breaks the stripes up (the standard fix, "dithering");
-          // it's far too faint to see as grain.
-          const _Grain(),
         ]),
       ),
     );
   }
-}
-
-class _Grain extends StatefulWidget {
-  const _Grain();
-
-  @override
-  State<_Grain> createState() => _GrainState();
-}
-
-class _GrainState extends State<_Grain> {
-  static Future<ui.Image>? _image;
-  ui.Image? _grain;
-
-  static Future<ui.Image> _make() {
-    const size = 128;
-    final rnd = math.Random(7);
-    final pixels = Uint8List(size * size * 4);
-    for (var i = 0; i < size * size; i++) {
-      final light = rnd.nextBool();
-      final v = light ? 255 : 0;
-      pixels[i * 4] = v;
-      pixels[i * 4 + 1] = v;
-      pixels[i * 4 + 2] = v;
-      pixels[i * 4 + 3] = 255; // solid here; made faint when drawn (see _GrainPainter)
-    }
-    final done = Completer<ui.Image>();
-    ui.decodeImageFromPixels(pixels, size, size, ui.PixelFormat.rgba8888, done.complete);
-    return done.future;
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    (_image ??= _make()).then((img) {
-      if (mounted) setState(() => _grain = img);
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final grain = _grain;
-    if (grain == null) return const SizedBox.expand();
-    return CustomPaint(painter: _GrainPainter(grain), size: Size.infinite);
-  }
-}
-
-class _GrainPainter extends CustomPainter {
-  _GrainPainter(this.grain);
-  final ui.Image grain;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    // The grain picture is solid black and white dots; drawn at under 2% it shifts each
-    // pixel by a step or so, which is all the stripes need.
-    final paint = Paint()
-      ..filterQuality = FilterQuality.none
-      ..color = const Color(0x05FFFFFF)
-      ..shader = ImageShader(grain, TileMode.repeated, TileMode.repeated, Matrix4.identity().storage);
-    canvas.drawRect(Offset.zero & size, paint);
-  }
-
-  @override
-  bool shouldRepaint(_GrainPainter old) => old.grain != grain;
 }

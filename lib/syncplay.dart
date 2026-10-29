@@ -20,6 +20,7 @@ import 'banners.dart';
 import 'gamepad.dart' show PadHint, PadButton, PadHints;
 import 'main.dart' show Jellyfin;
 import 'native_player.dart' show playerScreen;
+import 'perf.dart' show AppLog;
 import 'ui.dart';
 
 class SyncGroup {
@@ -64,6 +65,90 @@ class SyncPlay {
   /// When this PC asked for play/pause/seek last (to tell your own actions from others').
   DateTime lastOwnRequest = DateTime(0);
 
+  // ---------- Frame's own instant channel ----------
+  //
+  // Frames in a room send each other short messages through Jellyfin's live connection
+  // ("SendString" commands between sessions). No server-side waiting: whoever presses play,
+  // pause or seek sees it at once, and the other screens follow within a few milliseconds.
+  // It needs "Allow remote control of other users" on each profile (Jellyfin's rule for
+  // sending anything to another person's session). Without it, rooms use Jellyfin's
+  // Watch Together (SyncPlay) as before.
+
+  static const directTag = ' (Frame)';
+  static const _prefix = 'frame-together:';
+  bool direct = false; // this room uses Frame's channel
+  bool isHost = false; // this Frame opened the room (it keeps time)
+  String? _mySession;
+  List<String> _peers = [];
+  DateTime _peersAt = DateTime(0);
+  final _directIn = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get directMessages => _directIn.stream;
+
+  /// Whether this profile may send to other people's sessions on this server.
+  Future<bool> canDirect() async {
+    try {
+      final me = await jf.getPath('/Users/${jf.userId}');
+      final policy = me['Policy'] as Map?;
+      return policy?['EnableRemoteControlOfOtherUsers'] == true || policy?['IsAdministrator'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Tell Jellyfin this Frame can receive messages (needed to be reachable at all).
+  Future<void> _announce() async {
+    try {
+      await jf.postPath('/Sessions/Capabilities/Full', {
+        'PlayableMediaTypes': ['Video'],
+        'SupportedCommands': ['SendString', 'DisplayMessage'],
+        'SupportsMediaControl': true,
+      });
+      final mine = await jf.getPath('/Sessions?deviceId=${Uri.encodeQueryComponent(Jellyfin.deviceId)}');
+      if (mine is List && mine.isNotEmpty) _mySession = mine.first['Id']?.toString();
+    } catch (e) {
+      debugPrint('Together: could not announce this Frame: $e');
+    }
+  }
+
+  // The other Frames in this room (their sessions), refreshed every few seconds.
+  Future<List<String>> _roomPeers({bool fresh = false}) async {
+    if (!fresh && DateTime.now().difference(_peersAt) < const Duration(seconds: 8)) return _peers;
+    final people = group.value?.people.toSet() ?? <String>{};
+    try {
+      final list = await jf.getPath('/Sessions?controllableByUserId=${jf.userId}&activeWithinSeconds=900');
+      _peers = [
+        for (final s in (list as List))
+          if (s['Client'] == 'Frame' &&
+              s['Id']?.toString() != _mySession &&
+              s['DeviceId']?.toString() != Jellyfin.deviceId &&
+              people.contains(s['UserName']?.toString()))
+            s['Id'].toString(),
+      ];
+      _peersAt = DateTime.now();
+    } catch (e) {
+      debugPrint('Together: could not find the other Frames: $e');
+    }
+    return _peers;
+  }
+
+  /// Sends a message to every other Frame in the room.
+  Future<void> sendDirect(Map<String, dynamic> message, {bool freshPeers = false}) async {
+    final peers = await _roomPeers(fresh: freshPeers);
+    final body = {
+      'Name': 'SendString',
+      'Arguments': {'String': '$_prefix${jsonEncode(message)}'},
+    };
+    for (final id in peers) {
+      jf.postPath('/Sessions/$id/Command', body).then((_) {}, onError: (e) {
+        debugPrint('Together: message not delivered: $e');
+        _peersAt = DateTime(0); // look the peers up again next time
+      });
+    }
+  }
+
+  /// Server time in milliseconds (all Frames agree on it within a few ms).
+  int serverMs() => serverNow().millisecondsSinceEpoch;
+
   DateTime serverNow() => DateTime.now().toUtc().add(_offset);
   DateTime localTimeOf(DateTime serverTime) => serverTime.subtract(_offset);
   String _now() => serverNow().toIso8601String();
@@ -95,6 +180,7 @@ class SyncPlay {
     _keepAlive = Timer.periodic(const Duration(seconds: 30), (_) => _send({'MessageType': 'KeepAlive'}));
     await syncClock();
     _clock = Timer.periodic(const Duration(seconds: 60), (_) => syncClock());
+    await _announce();
     debugPrint('Together: connected (clock ${_offset.inMilliseconds} ms off, ${_rttMs} ms round trip)');
   }
 
@@ -158,6 +244,16 @@ class SyncPlay {
       case 'SyncPlayGroupUpdate':
         final d = m['Data'];
         if (d is Map) _onUpdate(d.cast<String, dynamic>());
+      case 'GeneralCommand':
+        final d = m['Data'];
+        final args = d is Map ? d['Arguments'] : null;
+        final text = args is Map ? args['String']?.toString() : null;
+        if (text != null && text.startsWith(_prefix)) {
+          try {
+            final msg = (jsonDecode(text.substring(_prefix.length)) as Map).cast<String, dynamic>();
+            _directIn.add(msg);
+          } catch (_) {}
+        }
     }
   }
 
@@ -176,6 +272,7 @@ class SyncPlay {
         }
       case 'UserJoined':
         if (g != null && data != null) group.value = g.copyWith(people: [...g.people, data.toString()]);
+        _peersAt = DateTime(0);
       case 'UserLeft':
         if (g != null && data != null) {
           final people = [...g.people];
@@ -270,36 +367,48 @@ class SyncPlay {
 
   // ---------- Playback requests (the server answers with commands for everyone) ----------
 
-  Future<void> pause() {
+  // Requests the room already satisfies aren't sent (the server would just echo them).
+  Future<void> pause() async {
     lastOwnRequest = DateTime.now();
-    return jf.postPath('/SyncPlay/Pause').then((_) {}, onError: (e) => debugPrint('Together: pause failed: $e'));
+    log('sent Pause');
+    await jf.postPath('/SyncPlay/Pause').then((_) {}, onError: (e) => log('pause failed: $e'));
   }
 
-  Future<void> unpause() {
+  Future<void> unpause() async {
+    if (group.value?.state == 'Playing') return;
     lastOwnRequest = DateTime.now();
-    return jf.postPath('/SyncPlay/Unpause').then((_) {}, onError: (e) => debugPrint('Together: play failed: $e'));
+    log('sent Unpause (room ${group.value?.state})');
+    await jf.postPath('/SyncPlay/Unpause').then((_) {}, onError: (e) => log('play failed: $e'));
   }
 
-  Future<void> seek(int ticks) {
+  Future<void> seek(int ticks) async {
     lastOwnRequest = DateTime.now();
-    return jf
-        .postPath('/SyncPlay/Seek', {'PositionTicks': ticks})
-        .then((_) {}, onError: (e) => debugPrint('Together: seek failed: $e'));
+    log('sent Seek pos=${(ticks / 10000000).toStringAsFixed(3)}');
+    await jf.postPath('/SyncPlay/Seek', {'PositionTicks': ticks}).then((_) {}, onError: (e) => log('seek failed: $e'));
   }
 
-  Future<void> buffering(int ticks, bool playing, String playlistItemId) => jf.postPath('/SyncPlay/Buffering', {
-        'When': _now(),
-        'PositionTicks': ticks,
-        'IsPlaying': playing,
-        'PlaylistItemId': playlistItemId,
-      }).then((_) {}, onError: (_) {});
+  Future<void> buffering(int ticks, bool playing, String playlistItemId, {String why = ''}) =>
+      _report('Buffering', ticks, playing, playlistItemId, why);
 
-  Future<void> ready(int ticks, bool playing, String playlistItemId) => jf.postPath('/SyncPlay/Ready', {
-        'When': _now(),
-        'PositionTicks': ticks,
-        'IsPlaying': playing,
-        'PlaylistItemId': playlistItemId,
-      }).then((_) {}, onError: (_) {});
+  Future<void> ready(int ticks, bool playing, String playlistItemId, {String why = ''}) =>
+      _report('Ready', ticks, playing, playlistItemId, why);
+
+  Future<void> _report(String kind, int ticks, bool playing, String playlistItemId, String why) {
+    final when = _now();
+    log('sent $kind pos=${(ticks / 10000000).toStringAsFixed(3)} playing=$playing when=$when '
+        'offset=${_offset.inMilliseconds} ms because: $why');
+    return jf.postPath('/SyncPlay/$kind', {
+      'When': when,
+      'PositionTicks': ticks,
+      'IsPlaying': playing,
+      'PlaylistItemId': playlistItemId,
+    }).then((_) {}, onError: (e) => log('$kind failed: $e'));
+  }
+
+  // ---------- Debug log (for comparing with the server's log) ----------
+  // together-YYYY-MM-DD.log in Frame's log folder (see perf.dart).
+  static final AppLog _log = AppLog('together');
+  void log(String message) => _log(message);
 }
 
 // ---------- Starting and joining ----------
@@ -333,7 +442,12 @@ Future<void> startWatchTogether(BuildContext context, Jellyfin jf, dynamic item)
     final title = item['Type'] == 'Episode'
         ? '${item['SeriesName'] ?? ''} S${item['ParentIndexNumber'] ?? '?'} E${item['IndexNumber'] ?? '?'}'
         : (item['Name'] ?? 'a movie').toString();
-    await sync.create('${jf.userName ?? 'Frame'} · $title');
+    // Frame's instant channel when this profile is allowed to use it; otherwise Jellyfin's.
+    final direct = await sync.canDirect();
+    await sync.create('${jf.userName ?? 'Frame'} · $title${direct ? SyncPlay.directTag : ''}');
+    sync.direct = direct;
+    sync.isHost = true;
+    if (!direct) debugPrint("Together: using Jellyfin's Watch Together (this profile can't use Frame's instant channel)");
     final resume = (item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
     await sync.play(item['Id'].toString(), resume);
     if (!context.mounted) return;
@@ -351,6 +465,13 @@ Future<void> joinWatchTogether(BuildContext context, Jellyfin jf, String groupId
     if (sync.group.value?.id != groupId) {
       await sync.leave();
       await sync.join(groupId);
+    }
+    final name = sync.group.value?.name ?? '';
+    sync.isHost = false;
+    sync.direct = name.endsWith(SyncPlay.directTag);
+    if (sync.direct && !await sync.canDirect()) {
+      throw "This room uses Frame's instant sync. Ask the server's admin to allow "
+          '"remote control of other users" for your profile (Dashboard › Users).';
     }
     await sync.awaitQueue(timeout: const Duration(seconds: 15));
     if (!context.mounted) return;
@@ -404,10 +525,13 @@ class _TogetherPillState extends State<TogetherPill> {
   static final Set<String> _invited = {};
 
   Future<void> _refresh() async {
+    // Only while Home is in front: no requests during a video or on other screens.
+    if (ModalRoute.of(context)?.isCurrent == false) return;
     try {
       final rooms = await SyncPlay.of(widget.jf).list();
       if (!mounted) return;
-      setState(() => _rooms = rooms);
+      // Redraw only when something changed.
+      if (jsonEncode(rooms) != jsonEncode(_rooms)) setState(() => _rooms = rooms);
       _maybeInvite(rooms);
     } catch (_) {
       // No SyncPlay access, or the server is unreachable: show nothing.
@@ -580,7 +704,8 @@ void showInvite(BuildContext context, Jellyfin jf, dynamic room) {
   final who = people.isEmpty ? 'Someone' : people.first;
   // Room names from Frame read "Name · Title": show the title part.
   final name = (room['GroupName'] ?? '').toString();
-  final what = name.contains(' · ') ? name.substring(name.indexOf(' · ') + 3) : name;
+  var what = name.contains(' · ') ? name.substring(name.indexOf(' · ') + 3) : name;
+  if (what.endsWith(SyncPlay.directTag)) what = what.substring(0, what.length - SyncPlay.directTag.length);
   final (a, b) = _accentOf(who);
   showBanner(
     context,
@@ -621,7 +746,139 @@ void showInvite(BuildContext context, Jellyfin jf, dynamic room) {
 
 typedef RoomVideo = ({String itemId, String playlistItemId, int startTicks, bool playing});
 
-class RoomFollower {
+/// What a player needs from a room, whichever way the room keeps in sync.
+abstract class RoomLink {
+  bool handingOver = false;
+  void start();
+  void dispose();
+  void togglePause();
+  void seek(double seconds);
+  Future<void> ready();
+  void stalled(bool stalled);
+
+  /// Frame's instant channel when the room uses it, Jellyfin's Watch Together otherwise.
+  static RoomLink create({
+    required SyncPlay sync,
+    required String playlistItemId,
+    required String itemId,
+    required String? myName,
+    required double Function() position,
+    required bool Function() isPaused,
+    required Future<void> Function(double seconds) seekTo,
+    required Future<void> Function(bool paused) setPaused,
+    required Future<void> Function(double speed) setSpeed,
+    required void Function(String text) notice,
+    required VoidCallback onStop,
+    required void Function(RoomVideo now) onNewVideo,
+    required Future<bool> Function() settled,
+    required Future<double> Function() exactPosition,
+    required double Function() duration,
+  }) =>
+      sync.direct
+          ? DirectFollower(
+              sync: sync,
+              itemId: itemId,
+              myName: myName,
+              position: position,
+              isPaused: isPaused,
+              seekTo: seekTo,
+              setPaused: setPaused,
+              setSpeed: setSpeed,
+              notice: notice,
+              onStop: onStop,
+              onNewVideo: onNewVideo,
+              settled: settled,
+              duration: duration)
+          : RoomFollower(
+              sync: sync,
+              playlistItemId: playlistItemId,
+              itemId: itemId,
+              myName: myName,
+              position: position,
+              isPaused: isPaused,
+              seekTo: seekTo,
+              setPaused: setPaused,
+              setSpeed: setSpeed,
+              notice: notice,
+              onStop: onStop,
+              onNewVideo: onNewVideo,
+              settled: settled,
+              exactPosition: exactPosition,
+              duration: duration);
+}
+
+// When to tell the room "my video stopped" (Buffer), following what testing showed:
+//  - only a stall that lasts 0.7 s or more counts; shorter ones fix themselves
+//  - stalls Frame caused itself (a jump to obey the room) don't count, for a moment after the
+//    jump and while a Ready is on its way
+//  - at most one Buffer a second, and the Ready never follows it back to back
+//  - the last half second of a video never counts
+// Reporting every hiccup is what made rooms stop and start twice a second.
+class StallGate {
+  StallGate({required this.onBuffer, required this.onRecovered, required this.nearEnd, required this.isPaused});
+
+  final void Function() onBuffer;
+  final void Function() onRecovered;
+  final bool Function() nearEnd;
+  final bool Function() isPaused;
+
+  static const _lasts = Duration(milliseconds: 700);
+  static const _gap = Duration(seconds: 1);
+
+  Timer? _timer;
+  bool reported = false; // a Buffer went out and its Ready hasn't yet
+  bool _stalled = false;
+  bool hold = false; // a jump Frame made is settling: its Ready is coming anyway
+  DateTime _muteUntil = DateTime(0);
+  DateTime _lastBuffer = DateTime(0);
+
+  /// Frame is about to jump or change speed itself: the stall that follows isn't news.
+  void selfAction([Duration quiet = const Duration(milliseconds: 1500)]) {
+    final until = DateTime.now().add(quiet);
+    if (until.isAfter(_muteUntil)) _muteUntil = until;
+  }
+
+  /// A Ready went out some other way (after a jump): nothing left to recover from.
+  void readySent() {
+    reported = false;
+    if (!_stalled) _timer?.cancel();
+  }
+
+  void update(bool stalled) {
+    _stalled = stalled;
+    _timer?.cancel();
+    if (stalled) {
+      _timer = Timer(_lasts, _maybeBuffer);
+    } else if (reported) {
+      final wait = _gap - DateTime.now().difference(_lastBuffer);
+      _timer = Timer(wait.isNegative ? Duration.zero : wait, () {
+        if (_stalled || !reported) return;
+        reported = false;
+        onRecovered();
+      });
+    }
+  }
+
+  void _maybeBuffer() {
+    if (!_stalled || reported || hold || isPaused() || nearEnd()) return;
+    final now = DateTime.now();
+    var wait = _muteUntil.difference(now);
+    final sinceLast = _gap - now.difference(_lastBuffer);
+    if (sinceLast > wait) wait = sinceLast;
+    if (wait > Duration.zero) {
+      // Still stalled once the quiet moment is over: then it's real.
+      _timer = Timer(wait + _lasts, _maybeBuffer);
+      return;
+    }
+    reported = true;
+    _lastBuffer = now;
+    onBuffer();
+  }
+
+  void dispose() => _timer?.cancel();
+}
+
+class RoomFollower extends RoomLink {
   RoomFollower({
     required this.sync,
     required this.playlistItemId,
@@ -635,6 +892,9 @@ class RoomFollower {
     required this.notice,
     required this.onStop,
     required this.onNewVideo,
+    required this.settled,
+    required this.exactPosition,
+    required this.duration,
   });
 
   final SyncPlay sync;
@@ -649,50 +909,155 @@ class RoomFollower {
   final void Function(String text) notice;
   final VoidCallback onStop;
   final void Function(RoomVideo now) onNewVideo;
+  final Future<bool> Function() settled; // not jumping, not loading
+  final Future<double> Function() exactPosition; // asked from the player right now
+  final double Function() duration;
 
   StreamSubscription? _commands;
   StreamSubscription? _updates;
   Timer? _drift;
   Timer? _scheduled;
+  Timer? _seekSend;
+  Timer? _recoverWatch;
   ({DateTime when, double pos})? _expected;
   bool _nudged = false;
   bool _done = false;
-  bool handingOver = false;
+  int _readyRun = 0; // only the newest Ready attempt sends: exactly one Ready per command
+  final List<({DateTime at, double pos})> _jumps = []; // the room's Seeks, to spot correction loops
+  DateTime _stuckNotice = DateTime(0);
 
-  int get _ticks => (position() * 10000000).round();
+  late final StallGate _gate = StallGate(
+    isPaused: isPaused,
+    nearEnd: () {
+      final d = duration();
+      return d > 0 && d - position() < 0.5;
+    },
+    onBuffer: () {
+      sync.buffering(_ticksOf(position()), !isPaused(), playlistItemId, why: 'stalled 0.7 s+');
+      // Whatever happens, a Ready follows as soon as the player can play (no group left stuck).
+      _recoverWatch?.cancel();
+      _recoverWatch = Timer.periodic(const Duration(seconds: 1), (_) async {
+        if (_done || !_gate.reported) {
+          _recoverWatch?.cancel();
+          return;
+        }
+        if (await settled()) _gate.update(false);
+      });
+    },
+    onRecovered: () {
+      _recoverWatch?.cancel();
+      _sendReady('recovered from stall');
+    },
+  );
 
+  static int _ticksOf(double sec) => (sec * 10000000).round();
+
+  @override
   void start() {
     _commands = sync.commands.listen(_onCommand);
     _updates = sync.updates.listen(_onUpdate);
     _drift = Timer.periodic(const Duration(seconds: 1), (_) => _keepInStep());
   }
 
+  @override
   void dispose() {
     _done = true;
+    _gate.dispose();
     _commands?.cancel();
     _updates?.cancel();
     _drift?.cancel();
     _scheduled?.cancel();
+    _seekSend?.cancel();
+    _recoverWatch?.cancel();
     if (!handingOver) sync.leave();
   }
 
   // ----- what you do -----
 
-  void togglePause() => isPaused() ? sync.unpause() : sync.pause();
+  @override
+  void togglePause() {
+    final state = sync.group.value?.state;
+    if (state == 'Waiting' && isPaused()) {
+      // The room is waiting on someone: play means "start anyway" (the server allows it).
+      sync.log('you pressed play while the room waits: start anyway');
+      sync.unpause();
+    } else if (isPaused()) {
+      if (state == 'Playing') {
+        // The room already plays: just catch up here, no request needed.
+        _catchUp();
+      } else {
+        sync.unpause();
+      }
+    } else {
+      sync.pause();
+    }
+  }
 
-  void seek(double seconds) => sync.seek((seconds.clamp(0, double.infinity) * 10000000).round());
+  Future<void> _catchUp() async {
+    final exp = _expected;
+    if (exp != null) {
+      _gate.selfAction();
+      await seekTo(exp.pos + sync.serverNow().difference(exp.when).inMicroseconds / 1e6);
+    }
+    await setPaused(false);
+  }
 
-  /// The video is open and settled at its place: tell the room.
-  Future<void> ready() => sync.ready(_ticks, !isPaused(), playlistItemId);
+  /// Jumps show here at once (so holding the skip button adds up), and the room hears about
+  /// it once you stop: one Seek per drag or burst of presses, not twenty.
+  @override
+  void seek(double seconds) {
+    final to = seconds < 0 ? 0.0 : seconds;
+    _expected = null; // don't pull back to the old spot meanwhile
+    _gate.selfAction();
+    seekTo(to);
+    _seekSend?.cancel();
+    _seekSend = Timer(const Duration(milliseconds: 450), () {
+      if (!_done) sync.seek(_ticksOf(to));
+    });
+  }
+
+  /// The video is open: tell the room once it has settled.
+  @override
+  Future<void> ready() => _sendReady('video opened');
+
+  /// Waits for the player to finish jumping and loading, makes sure it's really at [target]
+  /// (the room only accepts a Ready within half a second of its spot), then sends one Ready
+  /// with the player's true position.
+  Future<void> _sendReady(String why, {double? target}) async {
+    final run = ++_readyRun;
+    bool stale() => _done || run != _readyRun;
+    var reseeked = false;
+    for (var i = 0; i < 120; i++) {
+      if (stale()) return;
+      if (await settled()) {
+        if (target == null) break;
+        final at = await exactPosition();
+        if ((at - target).abs() <= 0.2) break;
+        // Settled in the wrong place (a keyframe, or the jump hadn't started yet): once, after
+        // giving it a second, jump again exactly.
+        if (i >= 10 && !reseeked) {
+          reseeked = true;
+          sync.log('landed at ${at.toStringAsFixed(3)} instead of ${target.toStringAsFixed(3)}: seeking again');
+          _gate.selfAction();
+          await seekTo(target);
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (stale()) return;
+    final pos = await exactPosition();
+    if (stale()) return;
+    _gate.hold = false;
+    _gate.readySent();
+    _recoverWatch?.cancel();
+    await sync.ready(_ticksOf(pos), !isPaused(), playlistItemId,
+        why: target == null ? why : '$why (target ${target.toStringAsFixed(3)})');
+  }
 
   /// Ran out of video to show (slow network), or recovered.
+  @override
   void stalled(bool stalled) {
-    if (_done) return;
-    if (stalled) {
-      sync.buffering(_ticks, !isPaused(), playlistItemId);
-    } else {
-      sync.ready(_ticks, !isPaused(), playlistItemId);
-    }
+    if (!_done) _gate.update(stalled);
   }
 
   // ----- what the room says -----
@@ -711,6 +1076,16 @@ class RoomFollower {
         : '$m:${r.toString().padLeft(2, '0')}';
   }
 
+  // How many times the room has sent us to this same spot in the last 10 s. 2 or more means the
+  // server is correcting us (it didn't accept our Ready).
+  int _repeatsOf(double pos) {
+    final now = DateTime.now();
+    _jumps.removeWhere((j) => now.difference(j.at) > const Duration(seconds: 10));
+    final n = _jumps.where((j) => (j.pos - pos).abs() < 0.6).length;
+    _jumps.add((at: now, pos: pos));
+    return n;
+  }
+
   void _onCommand(Map<String, dynamic> c) {
     if (_done) return;
     final cmd = c['Command']?.toString();
@@ -720,35 +1095,60 @@ class RoomFollower {
     final local = sync.localTimeOf(when);
     var delay = local.difference(DateTime.now().toUtc());
     if (delay.isNegative) delay = Duration.zero;
+    sync.log('got $cmd pos=${pos?.toStringAsFixed(3)} when=${c['When']} in ${delay.inMilliseconds} ms; '
+        'player at ${position().toStringAsFixed(3)} ${isPaused() ? 'paused' : 'playing'}');
     _scheduled?.cancel();
     final who = _who();
     switch (cmd) {
       case 'Unpause':
         _scheduled = Timer(delay, () async {
+          if (_done) return;
           final late = DateTime.now().toUtc().difference(local).inMicroseconds / 1e6;
           final target = (pos ?? position()) + (late > 0 ? late : 0);
-          if ((target - position()).abs() > 0.4) await seekTo(target);
+          if ((target - position()).abs() > 1.0) {
+            _gate.selfAction();
+            await seekTo(target);
+          }
           await setPaused(false);
           _expected = (when: when, pos: pos ?? position());
+          sync.log('did Unpause: at ${position().toStringAsFixed(3)}');
           if (who != 'You') notice('$who pressed play');
         });
       case 'Pause':
         _scheduled = Timer(delay, () async {
+          if (_done) return;
           await setPaused(true);
           _expected = null;
           await _resetSpeed();
-          if (pos != null && (pos - position()).abs() > 0.15) await seekTo(pos);
+          if (pos != null && (pos - position()).abs() > 0.5) {
+            _gate.selfAction();
+            await seekTo(pos);
+          }
+          sync.log('did Pause: at ${position().toStringAsFixed(3)}');
           if (who != 'You') notice('$who paused');
         });
       case 'Seek':
         _expected = null;
+        final target = pos ?? position();
+        final repeats = _repeatsOf(target);
+        _gate.hold = true; // our Ready is coming: no Buffer in between
+        _gate.selfAction();
         () async {
           await setPaused(true);
           await _resetSpeed();
-          if (pos != null) await seekTo(pos);
-          if (who != 'You') notice('$who jumped to ${_clock(pos ?? position())}');
-          await Future.delayed(const Duration(milliseconds: 600));
-          if (!_done) await ready();
+          await seekTo(target);
+          if (repeats == 0 && who != 'You') notice('$who jumped to ${_clock(target)}');
+          if (repeats >= 2) {
+            // The server keeps sending us back: give the player a moment before answering, and
+            // offer the way out instead of making everyone wait for its 30 s timeout.
+            sync.log('corrected $repeats times to ${target.toStringAsFixed(3)}: backing off');
+            if (DateTime.now().difference(_stuckNotice) > const Duration(seconds: 10)) {
+              _stuckNotice = DateTime.now();
+              notice('Having trouble lining up: press play to start anyway');
+            }
+            await Future.delayed(Duration(milliseconds: 600 * repeats.clamp(1, 4)));
+          }
+          await _sendReady('after Seek', target: target);
         }();
       case 'Stop':
         notice('The room stopped playing');
@@ -781,7 +1181,9 @@ class RoomFollower {
     final roomPos = exp.pos + sync.serverNow().difference(exp.when).inMicroseconds / 1e6;
     final behind = roomPos - position();
     if (behind.abs() > 2.0) {
+      sync.log('drifted ${behind.toStringAsFixed(2)} s: jumping to the room');
       await _resetSpeed();
+      _gate.selfAction();
       await seekTo(roomPos);
     } else if (behind.abs() > 0.08) {
       await setSpeed(1 + (behind * 0.5).clamp(-0.05, 0.05));
@@ -797,3 +1199,299 @@ class RoomFollower {
     await setSpeed(1.0);
   }
 }
+
+// ---------- Frame's instant sync ----------
+//
+// No waiting on the server. Rules:
+//  - Your press acts on your screen at once, then goes to the others with the exact moment
+//    (server clock) and position, so they land on the same frame, not a jump back.
+//  - The newest press wins everywhere (if two people press at once).
+//  - The host (who opened the room) sends where it is 4 times a second while playing; the
+//    others close any gap by playing up to 5% faster or slower, which nobody can see.
+//  - Someone's video loading: the others pause for them ("Waiting for Bob") and carry on
+//    together when it's ready.
+//  - Subtitles, audio and full screen stay each person's own.
+
+class DirectFollower extends RoomLink {
+  DirectFollower({
+    required this.sync,
+    required this.itemId,
+    required this.myName,
+    required this.position,
+    required this.isPaused,
+    required this.seekTo,
+    required this.setPaused,
+    required this.setSpeed,
+    required this.notice,
+    required this.onStop,
+    required this.onNewVideo,
+    required this.settled,
+    required this.duration,
+  });
+
+  final SyncPlay sync;
+  final String itemId;
+  final String? myName;
+  final double Function() position;
+  final bool Function() isPaused;
+  final Future<void> Function(double seconds) seekTo;
+  final Future<void> Function(bool paused) setPaused;
+  final Future<void> Function(double speed) setSpeed;
+  final void Function(String text) notice;
+  final VoidCallback onStop;
+  final void Function(RoomVideo now) onNewVideo;
+  final Future<bool> Function() settled;
+  final double Function() duration;
+
+  StreamSubscription? _in;
+  Timer? _seekSend;
+  late final StallGate _gate = StallGate(
+    isPaused: () => !_playing,
+    nearEnd: () {
+      final d = duration();
+      return d > 0 && d - position() < 0.5;
+    },
+    onBuffer: () {
+      sync.log('instant: my video is loading, asking the others to wait');
+      sync.sendDirect({'t': 'wait', 'by': _me, 'on': true});
+    },
+    onRecovered: () {
+      sync.log('instant: loaded again');
+      sync.sendDirect({'t': 'wait', 'by': _me, 'on': false});
+    },
+  );
+  StreamSubscription? _updates;
+  Timer? _tick;
+  Timer? _drift;
+  bool _done = false;
+
+  // The room's agreed state: playing or not, and where, as of a moment on the server clock.
+  bool _playing = false;
+  double _pos = 0;
+  int _at = 0;
+  final Set<String> _waitingFor = {};
+  bool _nudged = false;
+  bool _settled = false; // our video is open and ready
+
+  String get _me => myName ?? 'Someone';
+
+  // Where the room is right now.
+  double get _roomPos => _playing ? _pos + (sync.serverMs() - _at) / 1000 : _pos;
+
+  @override
+  void start() {
+    _in = sync.directMessages.listen(_onMessage);
+    _updates = sync.updates.listen(_onUpdate);
+    _drift = Timer.periodic(const Duration(milliseconds: 500), (_) => _keepInStep());
+    _tick = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (sync.isHost && _settled && _playing && _waitingFor.isEmpty && !isPaused()) {
+        sync.sendDirect({'t': 'tick', 'pos': position(), 'at': sync.serverMs()});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _done = true;
+    _gate.dispose();
+    _seekSend?.cancel();
+    _in?.cancel();
+    _updates?.cancel();
+    _tick?.cancel();
+    _drift?.cancel();
+    if (!handingOver) {
+      sync.sendDirect({'t': 'bye', 'by': _me});
+      sync.leave();
+    }
+  }
+
+  // ----- your presses: instant here, then to everyone -----
+
+  void _announce(String what) {
+    _at = sync.serverMs();
+    sync.sendDirect({'t': 'state', 'playing': _playing, 'pos': _pos, 'at': _at, 'by': _me, 'what': what});
+  }
+
+  @override
+  void togglePause() {
+    final pos = position();
+    _pos = pos;
+    _playing = isPaused();
+    setPaused(!_playing);
+    if (!_playing) _resetSpeed();
+    _announce(_playing ? 'play' : 'pause');
+  }
+
+  @override
+  void seek(double seconds) {
+    final to = seconds < 0 ? 0.0 : seconds;
+    _pos = to;
+    _at = sync.serverMs();
+    _gate.selfAction();
+    seekTo(to);
+    // Holding skip or dragging: everyone else jumps once, where you stop.
+    _seekSend?.cancel();
+    _seekSend = Timer(const Duration(milliseconds: 350), () {
+      if (!_done) _announce('seek');
+    });
+  }
+
+  @override
+  Future<void> ready() async {
+    for (var i = 0; i < 100 && !_done; i++) {
+      if (await settled()) break;
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (_done) return;
+    if (_settled) {
+      // Opened again mid-room (switched to the server's version, another audio track):
+      // just line up with the room again, don't restart it.
+      await _apply();
+      return;
+    }
+    _settled = true;
+    if (sync.isHost) {
+      // The host starts the room playing from where it opened.
+      _pos = position();
+      _playing = true;
+      await setPaused(false);
+      _announce('play');
+    } else {
+      // Ask the room where it is; the host answers with the current state.
+      sync.sendDirect({'t': 'hello', 'by': _me}, freshPeers: true);
+    }
+  }
+
+  @override
+  void stalled(bool stalled) {
+    if (_done || !_settled) return;
+    _gate.update(stalled);
+  }
+
+  // Loop breaker: if someone keeps stalling, stop pausing everyone for them; they catch up on
+  // their own (a jump) instead of the whole room stopping and starting over and over.
+  final Map<String, List<DateTime>> _stalls = {};
+  final Set<String> _notWaitingFor = {};
+
+  bool _shouldWaitFor(String by) {
+    if (_notWaitingFor.contains(by)) return false;
+    final now = DateTime.now();
+    final list = (_stalls[by] ??= [])..add(now);
+    list.removeWhere((t) => now.difference(t) > const Duration(seconds: 60));
+    if (list.length >= 3) {
+      _notWaitingFor.add(by);
+      notice("$by's connection is slow: carrying on without waiting");
+      Timer(const Duration(minutes: 5), () => _notWaitingFor.remove(by));
+      return false;
+    }
+    return true;
+  }
+
+  // ----- what the others say -----
+
+  void _onMessage(Map<String, dynamic> m) {
+    if (_done) return;
+    switch (m['t']) {
+      case 'state':
+        final at = (m['at'] as num?)?.toInt() ?? 0;
+        if (at < _at) return; // an older press than the one we already follow
+        final wasPos = _roomPos;
+        _playing = m['playing'] == true;
+        _pos = (m['pos'] as num?)?.toDouble() ?? _pos;
+        _at = at;
+        _apply();
+        final by = (m['by'] ?? 'Someone').toString();
+        switch (m['what']) {
+          case 'play':
+            notice('$by pressed play');
+          case 'pause':
+            notice('$by paused');
+          case 'seek':
+            if ((_pos - wasPos).abs() > 3) notice('$by jumped to ${RoomFollower._clock(_pos)}');
+        }
+      case 'tick':
+        if (sync.isHost || (_seekSend?.isActive ?? false)) return; // mid-jump: ours wins
+        final at = (m['at'] as num?)?.toInt() ?? 0;
+        if (at < _at) return;
+        _pos = (m['pos'] as num?)?.toDouble() ?? _pos;
+        _at = at;
+        _playing = true;
+      case 'hello':
+        if (sync.isHost && _settled) {
+          _pos = position();
+          _announce('sync');
+          notice('${m['by']} joined');
+        }
+      case 'wait':
+        final by = (m['by'] ?? 'Someone').toString();
+        if (m['on'] == true) {
+          if (!_shouldWaitFor(by)) return;
+          if (_waitingFor.add(by)) notice('Waiting for $by');
+          if (_playing) {
+            setPaused(true);
+            _resetSpeed();
+          }
+        } else {
+          _waitingFor.remove(by);
+          if (_waitingFor.isEmpty) _apply();
+        }
+      case 'bye':
+        _waitingFor.remove(m['by']?.toString());
+        notice('${m['by']} left');
+        // Alone or the host left: this Frame keeps time from now on.
+        if ((sync.group.value?.people.length ?? 1) <= 2) sync.isHost = true;
+        if (_waitingFor.isEmpty) _apply();
+    }
+  }
+
+  // Make this screen match the room: right place, playing or paused.
+  Future<void> _apply() async {
+    if (!_settled) return;
+    final target = _roomPos;
+    if ((target - position()).abs() > 0.3) {
+      _gate.selfAction();
+      await seekTo(target);
+    }
+    if (_playing && _waitingFor.isEmpty) {
+      await setPaused(false);
+    } else {
+      await setPaused(true);
+      await _resetSpeed();
+    }
+  }
+
+  void _onUpdate(Map<String, dynamic> u) {
+    if (_done) return;
+    switch (u['Type']) {
+      case 'GroupDoesNotExist':
+      case 'NotInGroup':
+      case 'GroupLeft':
+        notice('The room has closed');
+      case 'PlayQueue':
+        final now = sync.nowPlaying;
+        if (now != null && now.itemId != itemId) onNewVideo(now);
+    }
+  }
+
+  Future<void> _keepInStep() async {
+    if (_done || !_settled || sync.isHost || !_playing || _waitingFor.isNotEmpty || isPaused()) return;
+    final behind = _roomPos - position();
+    if (behind.abs() > 1.5) {
+      await _resetSpeed();
+      _gate.selfAction();
+      await seekTo(_roomPos);
+    } else if (behind.abs() > 0.06) {
+      await setSpeed(1 + (behind * 0.5).clamp(-0.05, 0.05));
+      _nudged = true;
+    } else if (_nudged) {
+      await _resetSpeed();
+    }
+  }
+
+  Future<void> _resetSpeed() async {
+    if (!_nudged) return;
+    _nudged = false;
+    await setSpeed(1.0);
+  }
+}
+

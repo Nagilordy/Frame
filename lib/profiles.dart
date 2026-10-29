@@ -381,14 +381,27 @@ class _StartScreenState extends State<StartScreen> {
       return;
     }
     // Only one profile, already signed in: straight to Home, like before.
+    // The server's profile list from last time decides at once (no wait for a sleeping NAS);
+    // it's refreshed in the background for next time.
+    final prefs = await SharedPreferences.getInstance();
+    final cachedKey = 'publicIds@$server';
+    final cached = prefs.getStringList(cachedKey);
     List<dynamic>? public;
-    try {
-      public = await Jellyfin(server).publicUsers().timeout(const Duration(seconds: 4));
-    } catch (_) {}
+    final fetch = Jellyfin(server).publicUsers().then((users) {
+      prefs.setStringList(cachedKey, [for (final u in users) u['Id'].toString()]);
+      return users;
+    });
+    if (cached == null) {
+      try {
+        public = await fetch.timeout(const Duration(seconds: 4));
+      } catch (_) {}
+    } else {
+      fetch.then((_) {}, onError: (_) {});
+    }
     if (!mounted) return;
-    final ids = {...saved.keys, for (final u in public ?? []) u['Id'].toString()};
+    final ids = {...saved.keys, ...?cached, for (final u in public ?? []) u['Id'].toString()};
     final only = ids.length == 1 ? ids.first : null;
-    final pick = only ?? (public == null ? last : null); // server unreachable: last profile
+    final pick = only ?? (public == null && cached == null ? last : null); // server unreachable: last profile
     final s = pick == null ? null : saved[pick];
     if (pick != null && s != null) {
       final jf = Jellyfin(server)
@@ -797,17 +810,29 @@ class _SignInScreenState extends State<SignInScreen> {
         _qcNote = 'Waiting for approval…';
       });
       _poll?.cancel();
+      var asking = false; // one check at a time, even when the server is slow to answer
+      var approved = false;
       _poll = Timer.periodic(const Duration(milliseconds: 2500), (_) async {
+        if (asking) return;
+        asking = true;
         try {
           if (!await _jf.quickConnectApproved(qc.secret)) return;
           _poll?.cancel();
+          approved = true;
           if (mounted) setState(() => _qcNote = 'Approved, signing in…');
           await _jf.quickConnectFinish(qc.secret);
           if (mounted) _openHome(context, _jf);
         } catch (e) {
-          // The code expired (after a few minutes): get a new one.
-          _poll?.cancel();
-          if (mounted) _startQuickConnect();
+          if (e == 'expired' || approved) {
+            // The code expired (after a few minutes), or signing in with it failed: new code.
+            _poll?.cancel();
+            if (mounted) _startQuickConnect();
+          } else if (mounted) {
+            // A network hiccup: keep the same code and keep checking.
+            setState(() => _qcNote = errorText(e));
+          }
+        } finally {
+          asking = false;
         }
       });
     } catch (e) {
@@ -1262,6 +1287,10 @@ class _ProfileMenuState extends State<_ProfileMenu> {
       setState(() => _confirmSignOut = true);
       return;
     }
+    // End the login on the server too, so it no longer works anywhere.
+    try {
+      await jf.postPath('/Sessions/Logout').timeout(const Duration(seconds: 4));
+    } catch (_) {}
     if (jf.userId != null) await ProfileStore.forget(jf.userId!, jf.server);
     if (mounted) _openWho(context, jf.server);
   }

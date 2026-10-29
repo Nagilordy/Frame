@@ -15,7 +15,9 @@ import 'gamepad.dart' show PadHint, PadHints, PadButton, padActive, fullScreenHi
 import 'ui.dart' show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent;
 import 'main.dart' show Jellyfin;
 import 'banners.dart' show showBanner, bannerIcon;
-import 'syncplay.dart' show SyncPlay, RoomFollower, RoomVideo;
+import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
+import 'perf.dart' show perfLog;
+import 'tracks.dart';
 
 // ---------- Look (same palette as the home screen) ----------
 
@@ -180,9 +182,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await set('deband', 'no');
   }
 
+  // Once a minute while playing: how playback is going, for the performance log (perf.dart).
+  int _statsTicks = 0;
+  Future<void> _logPlayback() async {
+    final mpv = player.platform;
+    if (mpv is! NativePlayer) return;
+    Future<String> p(String name) async {
+      try {
+        return await mpv.getProperty(name);
+      } catch (_) {
+        return '?';
+      }
+    }
+
+    perfLog('player: ${widget.item['Name']} · ${await p('width')}x${await p('height')}'
+        ' · ${_server ? 'server version' : 'original file'} · decoder ${await p('hwdec-current')}'
+        ' · fps ${await p('estimated-vf-fps')} on ${await p('display-fps')} Hz'
+        ' · dropped ${await p('frame-drop-count')} (decoder ${await p('decoder-frame-drop-count')})'
+        ' · buffered ${await p('demuxer-cache-duration')} s · step $_level');
+  }
+
   Future<void> _checkSmoothness() async {
     final mpv = player.platform;
     if (!mounted || mpv is! NativePlayer || _switching) return;
+    if (++_statsTicks % 6 == 0 && player.state.playing) unawaited(_logPlayback());
     int drops;
     try {
       drops = int.parse(await mpv.getProperty('frame-drop-count'));
@@ -249,6 +272,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       url = widget.jf.directStreamUrl(_id);
     }
     if (mpv is NativePlayer) {
+      // Exact seeks (not the nearest keyframe, which can be seconds away): Watch together
+      // only accepts a position within half a second of the room's.
+      if (widget.sync != null) await mpv.setProperty('hr-seek', 'yes');
       if (server) {
         // The server already fixed the colours: no conversion on this device.
         await mpv.setProperty('vf', '');
@@ -264,6 +290,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ..clear()
       ..addEntries(subtitles.map((s) => MapEntry(s.index, s.url)));
     final wasPlaying = player.state.playing;
+    if (!server) _tracksApplied = false;
     await player.open(Media(url), play: widget.sync == null || wasPlaying);
     // A text subtitle that was on before the switch: turn it back on.
     final text = _serverTextSub;
@@ -288,6 +315,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // With the server's version: choose audio. The server restarts its stream with that
   // track, at the same moment.
   Future<void> _chooseServerAudio(int index) async {
+    _tracks.rememberStream('audio', index);
     if (index == _serverAudio) return;
     _serverAudio = index;
     await _switchSource(server: true, force: true);
@@ -298,6 +326,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // its stream at the same moment.
   Future<void> _chooseServerSubtitle(dynamic stream) async {
     if (stream == null) {
+      _tracks.rememberSubsOff();
       _serverTextSub = null;
       await player.setSubtitleTrack(SubtitleTrack.no());
       if (_serverSub != null) {
@@ -307,6 +336,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return;
     }
     final index = (stream['Index'] ?? -1) as int;
+    _tracks.rememberStream('sub', index);
     if (stream['IsTextSubtitleStream'] == true && _serverSubUrls[index] != null) {
       _serverTextSub = index;
       if (_serverSub != null) {
@@ -382,13 +412,97 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
   int get _resumeTicks => widget.startTicks ?? (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
 
+  // ---------- Remembering audio and subtitle choices (tracks.dart) ----------
+
+  late final TrackPrefs _tracks = TrackPrefs(widget.item);
+  bool _tracksApplied = false;
+
+  // Jellyfin's description of one of mpv's tracks: mpv numbers each kind 1, 2, 3… in file
+  // order, the same order Jellyfin lists the file's own streams.
+  dynamic _streamFor(String id, String type) {
+    final n = int.tryParse(id);
+    if (n == null || n < 1) return null;
+    final list = _streams(type).where((s) => s['IsExternal'] != true).toList();
+    return n <= list.length ? list[n - 1] : null;
+  }
+
+  Map<String, dynamic> _describeAudio(AudioTrack t) {
+    final s = _streamFor(t.id, 'Audio');
+    return s != null ? TrackPrefs.describeStream(s) : TrackPrefs.describe(lang: t.language, title: t.title);
+  }
+
+  Map<String, dynamic> _describeSub(SubtitleTrack t) {
+    final s = _streamFor(t.id, 'Subtitle');
+    return s != null ? TrackPrefs.describeStream(s) : TrackPrefs.describe(lang: t.language, title: t.title);
+  }
+
+  // Server's version: choose the tracks before asking the server for its stream.
+  void _presetServerTracks() {
+    final audio = _tracks.audio, sub = _tracks.sub;
+    if (audio != null) _serverAudio = _tracks.bestStreamIndex('Audio', audio) ?? _serverAudio;
+    if (sub != null && sub['off'] != true) {
+      final index = _tracks.bestStreamIndex('Subtitle', sub);
+      final stream = _streams('Subtitle').cast<dynamic>().firstWhere((s) => s['Index'] == index, orElse: () => null);
+      if (stream != null) {
+        if (stream['IsTextSubtitleStream'] == true) {
+          _serverTextSub = index;
+        } else {
+          _serverSub = index;
+        }
+      }
+    }
+  }
+
+  // Original file: once its tracks are known, switch to the remembered kind.
+  Future<void> _applyTrackPrefs() async {
+    if (_server || _tracksApplied) return;
+    final audio = _tracks.audio, sub = _tracks.sub;
+    if (audio == null && sub == null) return;
+    final tracks = player.state.tracks;
+    if (tracks.audio.where((t) => int.tryParse(t.id) != null).isEmpty) return; // not known yet
+    _tracksApplied = true;
+    if (audio != null) {
+      final pick = TrackPrefs.best<AudioTrack>(audio, [
+        for (final t in tracks.audio)
+          if (int.tryParse(t.id) != null) (t, _describeAudio(t)),
+      ]);
+      if (pick != null) await player.setAudioTrack(pick);
+    }
+    if (sub != null) {
+      if (sub['off'] == true) {
+        await player.setSubtitleTrack(SubtitleTrack.no());
+        return;
+      }
+      final inside = TrackPrefs.best<SubtitleTrack>(sub, [
+        for (final t in tracks.subtitle)
+          if (int.tryParse(t.id) != null) (t, _describeSub(t)),
+      ]);
+      if (inside != null) {
+        await _setSubtitle(inside);
+        return;
+      }
+      // Not inside the file: maybe one stored next to it.
+      final external = TrackPrefs.best<dynamic>(sub, [
+        for (final s in _streams('Subtitle'))
+          if (s['IsExternal'] == true) (s, TrackPrefs.describeStream(s)),
+      ]);
+      if (external != null) await _setSubtitle(_externalTrack(external));
+    }
+  }
+
+  SubtitleTrack _externalTrack(dynamic s) => SubtitleTrack.uri(
+        widget.jf.externalSubtitleUrl(_id, s['Index'], (s['Codec'] ?? 'srt').toString()),
+        title: s['DisplayTitle'],
+        language: s['Language'],
+      );
+
   // ---------- Watch together ----------
-  RoomFollower? _room;
+  RoomLink? _room;
 
   void _startRoom() {
     final sync = widget.sync;
     if (sync == null) return;
-    _room = RoomFollower(
+    _room = RoomLink.create(
       sync: sync,
       playlistItemId: widget.playlistItemId ?? '',
       itemId: _id,
@@ -412,6 +526,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         if (mounted) Navigator.of(context).maybePop();
       },
       onNewVideo: _switchRoomVideo,
+      settled: () async => !player.state.buffering && player.state.duration > Duration.zero,
+      exactPosition: () async => player.state.position.inMicroseconds / 1e6,
+      duration: () => player.state.duration.inMicroseconds / 1e6,
     )..start();
     _subs.add(player.stream.buffering.listen((b) {
       if (!_switching && player.state.duration > Duration.zero) _room?.stalled(b);
@@ -461,6 +578,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
       }
     }));
+    // The file's tracks are known: pick the remembered audio and subtitles.
+    _subs.add(player.stream.tracks.listen((_) => _applyTrackPrefs()));
     // Close the player when the video ends.
     _subs.add(player.stream.completed.listen((done) {
       if (done && mounted) Navigator.of(context).maybePop();
@@ -560,8 +679,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _loadLevel();
       await _applyLevel();
     }
+    await _tracks.load();
     // Original file or the server's version (see "Original file or the server's version").
     final wantServer = _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
+    if (wantServer) _presetServerTracks();
     // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
     final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
     try {
@@ -662,12 +783,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _showControls();
   }
 
+  // Where the last skip went: holding the button adds up even while the player is still
+  // getting there (its position lags behind for a moment after each jump).
+  Duration? _skipTarget;
+  DateTime _skipAt = DateTime(0);
+
   void _skip(Duration by) {
     final duration = player.state.duration;
-    var target = player.state.position + by;
+    final recent = DateTime.now().difference(_skipAt) < const Duration(milliseconds: 1500);
+    var target = (recent ? _skipTarget ?? player.state.position : player.state.position) + by;
     if (target < Duration.zero) target = Duration.zero;
     if (duration > Duration.zero && target > duration) target = duration;
     _lastSeek = DateTime.now();
+    _skipTarget = target;
+    _skipAt = DateTime.now();
     final room = _room;
     if (room != null) {
       room.seek(target.inMicroseconds / 1e6);
@@ -753,6 +882,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // Space (or Options on the controller) always plays or pauses.
     if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.mediaPlayPause) {
       _togglePlay();
+      return KeyEventResult.handled;
+    }
+    // Triangle / Y: playback info, like in the mpv player.
+    if (key == LogicalKeyboardKey.contextMenu && _panel == _Panel.none) {
+      _toggleInfo();
       return KeyEventResult.handled;
     }
     // L1 / R1 on the controller always skip, controls up or not.
@@ -1349,23 +1483,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final current = player.state.track.audio;
       for (final t in player.state.tracks.audio) {
         if (t.id == 'no') continue;
-        add(_trackLabel(t.id, t.title, t.language, type: 'Audio'), t == current, () => player.setAudioTrack(t));
+        add(_trackLabel(t.id, t.title, t.language, type: 'Audio'), t == current, () {
+          player.setAudioTrack(t);
+          _tracks.remember('audio', _describeAudio(t));
+        });
       }
     } else {
       final current = player.state.track.subtitle;
       for (final t in player.state.tracks.subtitle) {
-        add(_trackLabel(t.id, t.title, t.language, type: 'Subtitle'), t == current, () => _setSubtitle(t));
+        add(_trackLabel(t.id, t.title, t.language, type: 'Subtitle'), t == current, () {
+          _setSubtitle(t);
+          if (t.id == 'no') {
+            _tracks.rememberSubsOff();
+          } else if (int.tryParse(t.id) != null) {
+            _tracks.remember('sub', _describeSub(t));
+          }
+        });
       }
       // Subtitles stored as separate files are not inside the video, so add them from Jellyfin.
       final external = ((widget.item['MediaStreams'] as List?) ?? [])
           .where((s) => s['Type'] == 'Subtitle' && s['IsExternal'] == true);
       for (final s in external) {
         add('${s['DisplayTitle'] ?? s['Language'] ?? 'Subtitle'} · separate file', false, () {
-          _setSubtitle(SubtitleTrack.uri(
-            widget.jf.externalSubtitleUrl(_id, s['Index'], (s['Codec'] ?? 'srt').toString()),
-            title: s['DisplayTitle'],
-            language: s['Language'],
-          ));
+          _setSubtitle(_externalTrack(s));
+          _tracks.remember('sub', TrackPrefs.describeStream(s));
         });
       }
       rows.addAll(_styleSection());

@@ -16,6 +16,7 @@ import 'banners.dart' show bannerHandlesKey;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
+import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'ui.dart' show isDesktop, toggleFullScreen;
 
@@ -27,11 +28,14 @@ Future<void> main() async {
     await windowManager.setTitle('Frame');
   }
   await Jellyfin.loadDeviceIdentity();
+  final mpvSearch = Stopwatch()..start();
   await findMpv();
+  perfLog('looking for mpv took ${mpvSearch.elapsedMilliseconds} ms');
   tidyArtworkCache();
   // Keep more artwork in memory so going back to a card shows it instantly.
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
   runApp(const TestApp());
+  PerfRecorder.start();
 }
 
 class TestApp extends StatefulWidget {
@@ -174,7 +178,7 @@ class Jellyfin {
   }
 
   static String get _client =>
-      'MediaBrowser Client="Frame", Device="$_deviceName", DeviceId="$_deviceId", Version="0.1"';
+      'MediaBrowser Client="Frame", Device="$_deviceName", DeviceId="$_deviceId", Version="0.2"';
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
@@ -326,54 +330,6 @@ class Jellyfin {
     _signedIn(jsonDecode(res.body));
   }
 
-  Future<List<dynamic>> items(String type) async {
-    final uri = Uri.parse('$server/Users/$userId/Items').replace(queryParameters: {
-      'IncludeItemTypes': type,
-      'Recursive': 'true',
-      'SortBy': 'DateCreated',
-      'SortOrder': 'Descending',
-      'Limit': '60',
-      'Fields': 'MediaStreams',
-    });
-    final res = await _http.get(uri, headers: _headers);
-    if (res.statusCode != 200) throw 'Could not load the library (${res.statusCode}).';
-    return jsonDecode(res.body)['Items'];
-  }
-
-  Future<List<dynamic>> episodes(String seriesId) async {
-    final uri = Uri.parse('$server/Shows/$seriesId/Episodes').replace(queryParameters: {
-      'UserId': userId!,
-      'Fields': 'MediaStreams',
-    });
-    final res = await _http.get(uri, headers: _headers);
-    if (res.statusCode != 200) throw 'Could not load episodes (${res.statusCode}).';
-    return jsonDecode(res.body)['Items'];
-  }
-
-  // Every movie and episode, with its streams, fetched in pages.
-  Future<List<dynamic>> allVideos() async {
-    final all = <dynamic>[];
-    var start = 0;
-    const page = 500;
-    while (true) {
-      final uri = Uri.parse('$server/Users/$userId/Items').replace(queryParameters: {
-        'IncludeItemTypes': 'Movie,Episode',
-        'Recursive': 'true',
-        'Fields': 'MediaStreams,Path',
-        'EnableImages': 'false',
-        'StartIndex': '$start',
-        'Limit': '$page',
-      });
-      final res = await _http.get(uri, headers: _headers);
-      if (res.statusCode != 200) throw 'Could not scan the library (${res.statusCode}).';
-      final items = jsonDecode(res.body)['Items'] as List;
-      all.addAll(items);
-      if (items.length < page) break;
-      start += page;
-    }
-    return all;
-  }
-
   // Tries the current Jellyfin address first, then the older one, so both server versions work.
   Future<dynamic> _getJson(List<Uri> candidates) async {
     var status = 0;
@@ -419,17 +375,6 @@ class Jellyfin {
       Uri.parse('$server/Users/$userId/Items/Latest').replace(queryParameters: q),
     ]);
     return data as List;
-  }
-
-  // Checks a saved login still works. Returns null when the server can't be reached at all,
-  // so the app can open anyway and offer Retry, instead of asking to log in again.
-  Future<bool?> isValid() async {
-    try {
-      final res = await _send(_http.get(Uri.parse('$server/Users/$userId'), headers: _headers));
-      return res.statusCode == 200;
-    } catch (_) {
-      return null;
-    }
   }
 
   // ---------- Libraries ----------
@@ -587,14 +532,15 @@ class Jellyfin {
 
   // ---------- Artwork ----------
 
-  String image(String id, String type, {int? maxWidth}) =>
-      '$server/Items/$id/Images/$type?quality=90${maxWidth != null ? '&maxWidth=$maxWidth' : ''}';
+  String image(String id, String type, {int? maxWidth, int quality = 90}) =>
+      '$server/Items/$id/Images/$type?quality=$quality${maxWidth != null ? '&maxWidth=$maxWidth' : ''}';
 
   // Full-screen backdrop. Episodes use their show's backdrop.
   String backdropFor(dynamic item, {int maxWidth = 1920}) {
     final own = (item['BackdropImageTags'] as List?)?.isNotEmpty ?? false;
     final id = own ? item['Id'] : (item['ParentBackdropItemId'] ?? item['SeriesId'] ?? item['Id']);
-    return image(id, 'Backdrop', maxWidth: maxWidth);
+    // Full-screen art: less compression, so dark areas stay smooth (no blocky steps).
+    return image(id, 'Backdrop', maxWidth: maxWidth, quality: 97);
   }
 
   // Title logo art, or null when there is none (the screen then shows the title as text).

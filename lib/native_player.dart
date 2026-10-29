@@ -20,10 +20,12 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
-import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHints, GamepadInput;
+import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHint, PadButton, PadHints, GamepadInput;
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
-import 'syncplay.dart' show SyncPlay, parseServerTime;
+import 'syncplay.dart' show SyncPlay, RoomLink;
+import 'perf.dart' show perfLog;
+import 'tracks.dart';
 import 'ui.dart';
 
 // ---------- Which player to use ----------
@@ -57,6 +59,31 @@ Future<double> _versionOf(String path) async {
   return 0;
 }
 
+/// mpv's version, remembered per file (path, size, date): asking a self-contained AppImage for
+/// its version means starting it, which takes a second or two, on every launch otherwise.
+Future<double> _cachedVersionOf(String path) async {
+  String? key;
+  try {
+    final stat = await File(path).stat();
+    key = 'mpvVersion|$path|${stat.size}|${stat.modified.millisecondsSinceEpoch}';
+    final prefs = await SharedPreferences.getInstance();
+    final known = prefs.getDouble(key);
+    if (known != null && known > 0) return known;
+    final v = await _versionOf(path);
+    if (v > 0) {
+      // Forget versions of older files, then remember this one.
+      for (final k in prefs.getKeys().where((k) => k.startsWith('mpvVersion|')).toList()) {
+        await prefs.remove(k);
+      }
+      await prefs.setDouble(key, v);
+    }
+    return v;
+  } catch (_) {
+    if (key == null) return 0;
+    return await _versionOf(path);
+  }
+}
+
 /// Looks for mpv once at startup: Frame's own copy first, then one bundled next to Frame,
 /// then the system's. If the best one is too old for HDR, Frame fetches a current mpv in the
 /// background and switches to it as soon as it's ready (no install, nothing to set up).
@@ -81,7 +108,7 @@ Future<void> findMpv() async {
       if (r.exitCode == 0 && p.isNotEmpty) _mpvPath = p;
     } catch (_) {}
   }
-  if (_mpvPath != null) _mpvVersion = await _versionOf(_mpvPath!);
+  if (_mpvPath != null) _mpvVersion = await _cachedVersionOf(_mpvPath!);
   debugPrint(_mpvPath == null
       ? 'Player: no mpv found, using the in-app player for now'
       : 'Player: videos play in mpv ${_mpvVersion.toStringAsFixed(2)} ($_mpvPath)'
@@ -465,6 +492,11 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       '--demuxer-readahead-secs=60',
       '--cache-pause-initial=yes',
       '--cache-pause-wait=1',
+      // After a long pause, the server may have closed the idle connection: reconnect quietly
+      // instead of stalling when you press play again.
+      '--stream-lavf-o-append=reconnect=1',
+      '--stream-lavf-o-append=reconnect_on_network_error=1',
+      '--stream-lavf-o-append=reconnect_delay_max=4',
       '--hr-seek=no',
       '--sub-ass-override=scale',
       '--script=$script',
@@ -489,6 +521,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     _mpv.observe(5, 'fullscreen');
     if (widget.sync != null) {
       _mpv.observe(6, 'paused-for-cache');
+      _mpv.observe(7, 'duration');
       _startTogether();
     }
     unawaited(_handOff());
@@ -506,6 +539,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       } else {
         _applyTrackPrefs();
       }
+      _link?.ready(); // the room is waiting for this player
     });
     widget.jf.reportStart(_id, _resumeTicks, session: _session);
     _syncTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -518,7 +552,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     final started = DateTime.now();
     _mpv.exitCode.then((code) {
       _takeBack();
-      if (_pos == 0 && DateTime.now().difference(started) < const Duration(seconds: 5)) {
+      // (Code 0 is a normal quit: you went back before it started, which is fine.)
+      if (code != 0 && _pos == 0 && DateTime.now().difference(started) < const Duration(seconds: 5)) {
         _ended = true;
         if (mounted) {
           setState(() => _error = "mpv closed right away (code $code). The terminal lines starting with 'mpv:' say why.");
@@ -593,6 +628,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
           if (data is bool) _mpvFull = data;
         case 'paused-for-cache':
           if (data is bool) _onStall(data);
+        case 'duration':
+          if (data is num) _duration = data.toDouble();
         case 'user-data/frame/request':
           if (data is Map) _onRequest(data);
       }
@@ -600,6 +637,9 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       _lastSeek = DateTime.now();
     } else if (e['event'] == 'file-loaded') {
       _loadedSeen = true;
+      Timer(const Duration(seconds: 2), () {
+        if (!_ended) _logPlayback('opened');
+      });
       if (_server) {
         // The server's stream carries no text subtitles: add the chosen one now.
         final text = _serverTextSub;
@@ -607,7 +647,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       } else {
         _applyTrackPrefs();
       }
-      if (widget.sync != null) _readyWhenSettled();
+      _link?.ready();
     }
   }
 
@@ -739,103 +779,14 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // default for everything else), described by language and kind (forced, SDH, audio
   // description), so the next episode picks the same kind of track even if it sits elsewhere.
 
-  Map<String, dynamic>? _audioPref;
+  late final TrackPrefs _tracks = TrackPrefs(_item);
   bool _loadedSeen = false;
-  Map<String, dynamic>? _subPref;
 
-  String? get _showKey => _item['SeriesId'] != null ? 'tracks-show-${_item['SeriesId']}' : null;
+  Future<void> _loadTrackPrefs() => _tracks.load();
 
-  Future<void> _loadTrackPrefs() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      Map<String, dynamic>? read(String? key) {
-        final raw = key == null ? null : prefs.getString(key);
-        return raw == null ? null : (jsonDecode(raw) as Map).cast<String, dynamic>();
-      }
-      final show = read(_showKey);
-      final all = read('tracks-default');
-      final audio = show?['audio'] ?? all?['audio'];
-      final sub = show?['sub'] ?? all?['sub'];
-      _audioPref = audio is Map ? audio.cast<String, dynamic>() : null;
-      _subPref = sub is Map ? sub.cast<String, dynamic>() : null;
-    } catch (e) {
-      debugPrint('Player: saved track choices could not be read: $e');
-    }
-  }
+  void _rememberTrack(String kind, Map<String, dynamic> pref) => _tracks.remember(kind, pref);
 
-  Future<void> _rememberTrack(String kind, Map<String, dynamic> pref) async {
-    if (kind == 'audio') {
-      _audioPref = pref;
-    } else {
-      _subPref = pref;
-    }
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      for (final key in [_showKey, 'tracks-default']) {
-        if (key == null) continue;
-        final raw = prefs.getString(key);
-        final m = raw == null ? <String, dynamic>{} : (jsonDecode(raw) as Map).cast<String, dynamic>();
-        m[kind] = pref;
-        await prefs.setString(key, jsonEncode(m));
-      }
-      debugPrint('Player: remembering $kind ${jsonEncode(pref)}');
-    } catch (_) {}
-  }
-
-  static bool _isDescription(String title) {
-    final t = title.toLowerCase();
-    return RegExp(r'\bad\b').hasMatch(t) || t.contains('descri') || t.contains('commentary') || t.contains('commentaire');
-  }
-
-  static bool _isSdh(String title) {
-    final t = title.toLowerCase();
-    return t.contains('sdh') || t.contains('hearing') || t.contains('malentendant') || RegExp(r'\bcc\b').hasMatch(t);
-  }
-
-  // A track (from Jellyfin or from mpv) described the same way.
-  static Map<String, dynamic> _describe({String? lang, String? title, bool forced = false, bool hi = false, bool vi = false}) {
-    final t = title ?? '';
-    return {
-      'lang': (lang ?? '').toLowerCase(),
-      'forced': forced || t.toLowerCase().contains('forced') || t.toLowerCase().contains('forcé'),
-      'sdh': hi || _isSdh(t),
-      'ad': vi || _isDescription(t),
-      'title': t.toLowerCase(),
-    };
-  }
-
-  Map<String, dynamic> _describeStream(dynamic s) => _describe(
-        lang: s['Language']?.toString(),
-        title: (s['Title'] ?? '').toString(),
-        forced: s['IsForced'] == true,
-        hi: s['IsHearingImpaired'] == true,
-      );
-
-  Map<String, dynamic> _describeMpv(Map t) => _describe(
-        lang: t['lang']?.toString(),
-        title: t['title']?.toString(),
-        forced: t['forced'] == true,
-        hi: t['hearing-impaired'] == true,
-        vi: t['visual-impaired'] == true,
-      );
-
-  // How well a track matches what was picked before (0 = not the same language).
-  static int _score(Map<String, dynamic> pref, Map<String, dynamic> track) {
-    if ((pref['lang'] ?? '') != '' && pref['lang'] != track['lang']) return 0;
-    var score = 10;
-    for (final k in ['forced', 'sdh', 'ad']) {
-      if ((pref[k] == true) == (track[k] == true)) score += 3;
-    }
-    if (pref['title'] != null && pref['title'] == track['title']) score += 1;
-    return score;
-  }
-
-  void _rememberStream(String kind, int index) {
-    final s = _streams(kind == 'audio' ? 'Audio' : 'Subtitle')
-        .cast<dynamic>()
-        .firstWhere((x) => x['Index'] == index, orElse: () => null);
-    if (s != null) _rememberTrack(kind, _describeStream(s));
-  }
+  void _rememberStream(String kind, int index) => _tracks.rememberStream(kind, index);
 
   // A pick made in the original file's track list (mpv's own tracks).
   Future<void> _rememberMpvTrack(String kind) async {
@@ -844,36 +795,26 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     final type = kind == 'audio' ? 'audio' : 'sub';
     final picked = list.cast<Map>().where((t) => t['type'] == type && t['selected'] == true).toList();
     if (picked.isEmpty) {
-      if (kind == 'sub') await _rememberTrack('sub', const {'off': true});
+      if (kind == 'sub') await _tracks.rememberSubsOff();
       return;
     }
-    await _rememberTrack(kind, _describeMpv(picked.first));
+    await _tracks.remember(kind, TrackPrefs.describeMpv(picked.first));
   }
 
   // Original file: when mpv has opened it, switch to the remembered kind of tracks.
   Future<void> _applyTrackPrefs() async {
-    if (_server || (_audioPref == null && _subPref == null)) return;
+    final audio = _tracks.audio, sub = _tracks.sub;
+    if (_server || (audio == null && sub == null)) return;
     final list = await _mpv.get('track-list');
     if (list is! List) return;
     final tracks = list.cast<Map>();
-    int? best(String type, Map<String, dynamic> pref) {
-      int? id;
-      var top = 0;
-      for (final t in tracks.where((t) => t['type'] == type)) {
-        final sc = _score(pref, _describeMpv(t));
-        if (sc > top) {
-          top = sc;
-          id = t['id'] as int?;
-        }
-      }
-      return id;
-    }
-    final audio = _audioPref;
+    int? best(String type, Map<String, dynamic> pref) => TrackPrefs.best<int?>(pref, [
+          for (final t in tracks.where((t) => t['type'] == type)) (t['id'] as int?, TrackPrefs.describeMpv(t)),
+        ]);
     if (audio != null) {
       final id = best('audio', audio);
       if (id != null) await _mpv.set('aid', id);
     }
-    final sub = _subPref;
     if (sub != null) {
       if (sub['off'] == true) {
         await _mpv.set('sid', 'no');
@@ -889,23 +830,10 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
 
   // Server's version: choose the tracks before asking the server for its stream.
   void _presetServerTracks() {
-    int? best(String type, Map<String, dynamic> pref) {
-      int? index;
-      var top = 0;
-      for (final s in _streams(type)) {
-        final sc = _score(pref, _describeStream(s));
-        if (sc > top) {
-          top = sc;
-          index = s['Index'] as int?;
-        }
-      }
-      return index;
-    }
-    final audio = _audioPref;
-    if (audio != null) _serverAudio = best('Audio', audio) ?? _serverAudio;
-    final sub = _subPref;
+    final audio = _tracks.audio, sub = _tracks.sub;
+    if (audio != null) _serverAudio = _tracks.bestStreamIndex('Audio', audio) ?? _serverAudio;
     if (sub != null && sub['off'] != true) {
-      final index = best('Subtitle', sub);
+      final index = _tracks.bestStreamIndex('Subtitle', sub);
       final stream = _streams('Subtitle').cast<dynamic>().firstWhere((s) => s['Index'] == index, orElse: () => null);
       if (stream != null) {
         if (stream['IsTextSubtitleStream'] == true) {
@@ -925,38 +853,70 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // faster or slower for a moment instead of jumping.
 
   SyncPlay? get _sync => widget.sync;
-  StreamSubscription? _syncCommands;
-  StreamSubscription? _syncUpdates;
-  Timer? _driftTimer;
   Map<String, dynamic>? _room; // for the controls: name, people, state
-  ({DateTime when, double pos})? _expected; // where the room is while it plays
-  bool _speedNudged = false;
+  double _duration = 0;
   bool _handingOver = false;
   String? _myName;
 
   String get _playlistItemId => widget.playlistItemId ?? '';
-  int get _ticks => (_pos * 10000000).round();
+
+  // Frame's instant channel (when the room uses it): the shared follower in syncplay.dart.
+  RoomLink? _link;
 
   void _startTogether() {
     final sync = _sync!;
     _myName = widget.jf.userName;
-    _syncCommands = sync.commands.listen(_onTogetherCommand);
-    _syncUpdates = sync.updates.listen(_onTogetherUpdate);
+    _link = RoomLink.create(
+      sync: sync,
+      playlistItemId: _playlistItemId,
+      itemId: _id,
+      myName: _myName,
+      position: () => _pos,
+      isPaused: () => _paused,
+      // Exact seeks always: the room only accepts a position within half a second of its own.
+      seekTo: (sec) => _mpv.command(['seek', sec, 'absolute+exact']).then((_) {}, onError: (_) {}),
+      setPaused: (paused) {
+        _paused = paused;
+        return _mpv.set('pause', paused);
+      },
+      setSpeed: (speed) => _mpv.set('speed', speed),
+      notice: _notice,
+      onStop: () => _mpv.command(['quit']).then((_) {}, onError: (_) {}),
+      onNewVideo: (now) {
+        if (mounted) _switchRoomVideo(now);
+      },
+      settled: () async {
+        try {
+          final seeking = await _mpv.get('seeking');
+          final loading = await _mpv.get('paused-for-cache');
+          return seeking != true && loading != true;
+        } catch (_) {
+          return true;
+        }
+      },
+      exactPosition: () async {
+        try {
+          final v = await _mpv.get('time-pos');
+          if (v is num) return _pos = v.toDouble();
+        } catch (_) {}
+        return _pos;
+      },
+      duration: () => _duration,
+    )..start();
     sync.group.addListener(_onRoomChanged);
     _onRoomChanged();
-    _driftTimer = Timer.periodic(const Duration(seconds: 1), (_) => _keepInStep());
   }
 
   void _endTogether() {
     final sync = _sync;
     if (sync == null) return;
-    _syncCommands?.cancel();
-    _syncUpdates?.cancel();
-    _driftTimer?.cancel();
-    _scheduled?.cancel();
     sync.group.removeListener(_onRoomChanged);
-    // Leaving the player leaves the room (not when the room just moved on to another video).
-    if (!_handingOver) sync.leave();
+    final link = _link;
+    _link = null;
+    if (link != null) {
+      link.handingOver = _handingOver;
+      link.dispose(); // leaves the room unless it moved on to another video
+    }
   }
 
   void _onRoomChanged() {
@@ -974,99 +934,17 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   void _notice(String text) =>
       _mpv.command(['script-message-to', 'frame_ui', 'notice', text]).then((_) {}, onError: (_) {});
 
-  // Who did it: you, or (in a room of two) the other person by name.
-  String _who() {
-    final sync = _sync!;
-    if (DateTime.now().difference(sync.lastOwnRequest) < const Duration(seconds: 3)) return 'You';
-    final others = (sync.group.value?.people ?? const <String>[]).where((p) => p != _myName).toSet().toList();
-    return others.length == 1 ? others.first : 'Someone';
-  }
-
   Future<void> _togetherRequest(Map value) async {
-    final sync = _sync;
-    if (sync == null) return;
+    final link = _link;
+    if (link == null) return;
     switch (value['op']) {
       case 'toggle':
-        if (_paused) {
-          await sync.unpause();
-        } else {
-          await sync.pause();
-        }
       case 'pause':
-        await sync.pause();
       case 'unpause':
-        await sync.unpause();
+        link.togglePause();
       case 'seek':
         final pos = (value['pos'] as num?)?.toDouble();
-        if (pos != null) await sync.seek((pos * 10000000).round());
-    }
-  }
-
-  Timer? _scheduled;
-
-  void _onTogetherCommand(Map<String, dynamic> c) {
-    final sync = _sync!;
-    final cmd = c['Command']?.toString();
-    final when = c['When'] == null ? sync.serverNow() : parseServerTime(c['When'].toString());
-    final ticks = c['PositionTicks'] as int?;
-    final pos = ticks == null ? null : ticks / 10000000;
-    final local = sync.localTimeOf(when);
-    var delay = local.difference(DateTime.now().toUtc());
-    if (delay.isNegative) delay = Duration.zero;
-    _scheduled?.cancel();
-    switch (cmd) {
-      case 'Unpause':
-        final who = _who();
-        _scheduled = Timer(delay, () async {
-          // Starting late (a slow message): start where the room already is.
-          final late = DateTime.now().toUtc().difference(local).inMicroseconds / 1e6;
-          final target = (pos ?? _pos) + (late > 0 ? late : 0);
-          if ((target - _pos).abs() > 0.4) await _mpv.command(['seek', target, 'absolute', 'exact']);
-          await _mpv.set('pause', false);
-          _expected = (when: when, pos: pos ?? _pos);
-          if (who != 'You') _notice('$who pressed play');
-        });
-      case 'Pause':
-        final who = _who();
-        _scheduled = Timer(delay, () async {
-          await _mpv.set('pause', true);
-          _expected = null;
-          await _resetSpeed();
-          if (pos != null && (pos - _pos).abs() > 0.15) await _mpv.command(['seek', pos, 'absolute', 'exact']);
-          if (who != 'You') _notice('$who paused');
-        });
-      case 'Seek':
-        final who = _who();
-        _expected = null;
-        () async {
-          await _mpv.set('pause', true);
-          await _resetSpeed();
-          if (pos != null) await _mpv.command(['seek', pos, 'absolute', 'exact']);
-          if (who != 'You') _notice('$who jumped to ${_clock(pos ?? _pos)}');
-          await _readyWhenSettled();
-        }();
-      case 'Stop':
-        _notice('The room stopped playing');
-        _mpv.command(['quit']).then((_) {}, onError: (_) {});
-    }
-  }
-
-  void _onTogetherUpdate(Map<String, dynamic> u) {
-    switch (u['Type']) {
-      case 'UserJoined':
-        _notice('${u['Data']} joined');
-      case 'UserLeft':
-        _notice('${u['Data']} left');
-      case 'GroupDoesNotExist':
-      case 'NotInGroup':
-      case 'GroupLeft':
-        _notice('The room has closed');
-      case 'LibraryAccessDenied':
-        _notice("Someone in the room can't open this video");
-      case 'PlayQueue':
-        // Someone (in Frame or the Jellyfin app) picked another video for the room.
-        final now = _sync!.nowPlaying;
-        if (now != null && now.itemId != _id && mounted) _switchRoomVideo(now);
+        if (pos != null) link.seek(pos);
     }
   }
 
@@ -1077,10 +955,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       _ended = true; // this screen hands over; the room continues
       _handingOver = true;
       widget.jf.reportStopped(_id, _ticksNow, session: _session);
-      _syncCommands?.cancel();
-      _syncUpdates?.cancel();
-      _driftTimer?.cancel();
-      _sync!.group.removeListener(_onRoomChanged);
+      _endTogether(); // hands over: the room stays
       await _mpv.close();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(MaterialPageRoute(
@@ -1091,64 +966,12 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     }
   }
 
-  // Tell the room we're ready once mpv has the picture at the right place.
-  Future<void> _readyWhenSettled() async {
-    final sync = _sync;
-    if (sync == null) return;
-    for (var i = 0; i < 100; i++) {
-      final seeking = await _mpv.get('seeking');
-      final stalled = await _mpv.get('paused-for-cache');
-      if (seeking != true && stalled != true) break;
-      await Future.delayed(const Duration(milliseconds: 100));
-    }
-    if (_ended) return;
-    await sync.ready(_ticks, !_paused, _playlistItemId);
-  }
-
-  // mpv ran out of video to show (slow network): the room waits for us.
+  // mpv ran out of video to show (slow network): the follower decides whether that's news.
   void _onStall(bool stalled) {
-    final sync = _sync;
-    if (sync == null || _ended) return;
-    if (stalled) {
-      sync.buffering(_ticks, !_paused, _playlistItemId);
-    } else {
-      sync.ready(_ticks, !_paused, _playlistItemId);
-    }
+    if (!_ended) _link?.stalled(stalled);
   }
 
-  // While playing: compare with where the room is, and close the gap smoothly.
-  Future<void> _keepInStep() async {
-    final sync = _sync;
-    final exp = _expected;
-    if (sync == null || exp == null || _paused || _ended || _switching) return;
-    final roomPos = exp.pos + sync.serverNow().difference(exp.when).inMicroseconds / 1e6;
-    final behind = roomPos - _pos; // positive: we're behind
-    if (behind.abs() > 2.0) {
-      await _resetSpeed();
-      await _mpv.command(['seek', roomPos, 'absolute', 'exact']);
-    } else if (behind.abs() > 0.08) {
-      // Up to 5% faster or slower: not noticeable, and catches up within a few seconds.
-      final speed = 1 + (behind * 0.5).clamp(-0.05, 0.05);
-      await _mpv.set('speed', speed);
-      _speedNudged = true;
-    } else if (_speedNudged) {
-      await _resetSpeed();
-    }
-  }
 
-  Future<void> _resetSpeed() async {
-    if (!_speedNudged) return;
-    _speedNudged = false;
-    await _mpv.set('speed', 1.0);
-  }
-
-  static String _clock(double sec) {
-    final s = sec.floor();
-    final h = s ~/ 3600, m = (s % 3600) ~/ 60, r = s % 60;
-    return h > 0
-        ? '$h:${m.toString().padLeft(2, '0')}:${r.toString().padLeft(2, '0')}'
-        : '$m:${r.toString().padLeft(2, '0')}';
-  }
 
   // ---------- Original file or the server's version ----------
 
@@ -1270,8 +1093,25 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     }
   }
 
+  // Once a minute while playing, and when a file opens: how playback is going, for the
+  // performance log (perf.dart).
+  int _statsTicks = 0;
+  Future<void> _logPlayback(String when) async {
+    Future<String> p(String name) async => '${await _mpv.get(name) ?? '?'}';
+    final params = await _mpv.get('video-params');
+    final target = await _mpv.get('video-target-params');
+    final size = params is Map ? '${params['w']}x${params['h']} ${params['gamma'] ?? ''}' : '?';
+    final out = target is Map ? '${target['gamma'] ?? '?'}' : '?';
+    perfLog('mpv $when: ${titleOf(_item)} · $size -> $out · ${_server ? 'server version' : 'original file'}'
+        ' · decoder ${await p('hwdec-current')} · fps ${await p('estimated-vf-fps')} on ${await p('display-fps')} Hz'
+        ' · dropped ${await p('frame-drop-count')} (decoder ${await p('decoder-frame-drop-count')})'
+        ' · mistimed ${await p('mistimed-frame-count')} · delayed ${await p('vo-delayed-frame-count')}'
+        ' · buffered ${await p('demuxer-cache-duration')} s · step $_level');
+  }
+
   Future<void> _checkSmoothness() async {
     if (_switching || _ended) return;
+    if (++_statsTicks % 6 == 0 && !_paused) unawaited(_logPlayback('playing'));
     final raw = await _mpv.get('frame-drop-count');
     if (raw is! num) return;
     final drops = raw.toInt();
@@ -1335,7 +1175,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   @override
   Widget build(BuildContext context) {
     return PadHints(
-      hints: const [], // the legend is drawn inside mpv
+      // The legend is drawn inside mpv; only the error screen here needs one.
+      hints: _error != null ? const [PadHint(PadButton.back, 'Back')] : const [],
       child: Focus(
         focusNode: _focus,
         autofocus: true,

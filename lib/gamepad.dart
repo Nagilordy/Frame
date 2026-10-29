@@ -26,7 +26,7 @@ import 'ui.dart' show toggleFullScreen, focusLabels, fullScreen, isDesktop;
 
 enum PadStyle { playstation, xbox }
 
-enum PadButton { select, back, playPause, skip, fullScreen, menu, delete }
+enum PadButton { select, back, playPause, skip, fullScreen, menu, delete, tabs }
 
 class PadHint {
   const PadHint(this.button, this.label);
@@ -154,6 +154,17 @@ class GamepadInput {
     // the left stick right away, before doing any work.
     if (_ignored.contains(e.gamepadId)) return;
     final axis = e.axis;
+    // L2 / R2: pressed past 60%, released below 30% (so a resting finger can't repeat it).
+    if (axis == GamepadAxis.leftTrigger || axis == GamepadAxis.rightTrigger) {
+      final left = axis == GamepadAxis.leftTrigger;
+      final down = left ? _l2 : _r2;
+      if (!down && e.value > 0.6) {
+        _trigger(left, true, 'axis');
+      } else if (down && e.value < 0.3) {
+        _trigger(left, false, 'axis');
+      }
+      return;
+    }
     if (axis != null && axis != GamepadAxis.leftStickX && axis != GamepadAxis.leftStickY) return;
     if (axis != null) {
       if (axis == GamepadAxis.leftStickX) _lx = e.value;
@@ -168,6 +179,21 @@ class GamepadInput {
     if (style != null && padStyle.value != style) padStyle.value = style;
 
     final button = e.button;
+
+    // L2 / R2's on/off button (raw buttons 6 and 7 on the PS5 controller under Linux) isn't in
+    // the controller library's mapping, so it hands them over as a d-pad: L2 came out as Right
+    // and R2 as Down, moving the selection with every trigger press. The real d-pad never uses
+    // those raw buttons (it's an axis), so they're read here as the triggers they are.
+    if (button != null &&
+        _dpad.contains(button) &&
+        e.rawEvent.type == KeyType.button &&
+        (e.rawEvent.key == '6' || e.rawEvent.key == '7')) {
+      // The library sends a pair (Left + Right, or Up + Down) for each one: use one of them.
+      if (button == GamepadButton.dpadRight || button == GamepadButton.dpadDown) {
+        _trigger(e.rawEvent.key == '6', e.rawEvent.value.abs() > 0.5, 'button');
+      }
+      return;
+    }
 
     // On Linux the PlayStation d-pad is one up/down axis and one left/right axis, not four
     // buttons. Read its raw direction (minus = up or left, plus = down or right) so Up can
@@ -231,6 +257,10 @@ class GamepadInput {
         if (pressed) _send(LogicalKeyboardKey.mediaRewind);
       case GamepadButton.rightBumper:
         if (pressed) _send(LogicalKeyboardKey.mediaFastForward);
+      case GamepadButton.leftTrigger:
+        _trigger(true, pressed, 'button');
+      case GamepadButton.rightTrigger:
+        _trigger(false, pressed, 'button');
       // Create (PlayStation) or View (Xbox) switches full screen. The touchpad press counts
       // too when Linux passes it to the controller (often it goes to the mouse instead).
       case GamepadButton.touchpad:
@@ -241,8 +271,38 @@ class GamepadInput {
     }
   }
 
+  // L2 / R2 switch tabs (Home, Anime, Movies…; seasons on a show page): sent as Page Up /
+  // Page Down, which a real keyboard can use too. Each press counts once, whether the
+  // trigger arrives as a button, an analog axis, or both.
+  // The trigger's button and its pressure reading can disagree for a moment (one says
+  // released while the other still reads pressed), which counted one press twice. So a press
+  // also needs 250 ms since the last one on that side.
+  static bool _l2 = false, _r2 = false;
+  static DateTime _l2At = DateTime(0), _r2At = DateTime(0);
+  static void _trigger(bool left, bool pressed, String from) {
+    if ((left ? _l2 : _r2) == pressed) return;
+    if (left) {
+      _l2 = pressed;
+    } else {
+      _r2 = pressed;
+    }
+    if (!pressed) return;
+    final now = DateTime.now();
+    if (now.difference(left ? _l2At : _r2At) < const Duration(milliseconds: 250)) return;
+    if (left) {
+      _l2At = now;
+    } else {
+      _r2At = now;
+    }
+    padActive.value = true;
+    debugPrint('Controller: ${left ? 'L2' : 'R2'} ($from)');
+    _send(left ? LogicalKeyboardKey.pageUp : LogicalKeyboardKey.pageDown);
+  }
+
   // Lets go of everything: no direction held, no repeat running.
   static void releaseAll() {
+    _l2 = false;
+    _r2 = false;
     _repeat?.cancel();
     _repeat = null;
     _held = null;
@@ -306,6 +366,8 @@ class GamepadInput {
     LogicalKeyboardKey.mediaPlayPause: PhysicalKeyboardKey.mediaPlayPause,
     LogicalKeyboardKey.mediaRewind: PhysicalKeyboardKey.mediaRewind,
     LogicalKeyboardKey.mediaFastForward: PhysicalKeyboardKey.mediaFastForward,
+    LogicalKeyboardKey.pageUp: PhysicalKeyboardKey.pageUp,
+    LogicalKeyboardKey.pageDown: PhysicalKeyboardKey.pageDown,
   };
 
   // Hands the key to the selected widget, then to each widget around it, exactly the way
@@ -433,6 +495,7 @@ class PadLegend extends StatelessWidget {
       const PadHint(PadButton.select, 'Select'),
       if (canGoBack) const PadHint(PadButton.back, 'Back'),
       if (!canGoBack) const PadHint(PadButton.menu, 'Profile'),
+      const PadHint(PadButton.tabs, 'Tabs'),
       if (isDesktop) fullScreenHint(),
     ];
   }
@@ -549,6 +612,12 @@ class PadGlyph extends StatelessWidget {
           pill(ps ? 'L1' : 'LB'),
           SizedBox(width: size * 0.18),
           pill(ps ? 'R1' : 'RB'),
+        ]);
+      case PadButton.tabs:
+        return Row(mainAxisSize: MainAxisSize.min, children: [
+          pill(ps ? 'L2' : 'LT'),
+          SizedBox(width: size * 0.18),
+          pill(ps ? 'R2' : 'RT'),
         ]);
       case PadButton.delete:
         return Container(
