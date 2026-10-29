@@ -57,10 +57,19 @@ local function toggle_pause()
   if in_room() then request('sync', { op = 'toggle' }) else mp.command('cycle pause') end
 end
 
+-- Where the last jump went, so presses in quick succession (holding skip) add up even while
+-- mpv is still getting there.
+local pending_pos, pending_at = nil, 0
+
 local function seek_by(sec)
   if in_room() then
-    local p = (mp.get_property_number('time-pos', 0) or 0) + sec
-    request('sync', { op = 'seek', pos = math.max(0, p) })
+    local base = mp.get_property_number('time-pos', 0) or 0
+    if pending_pos and mp.get_time() - pending_at < 1.5 then base = pending_pos end
+    local dur = mp.get_property_number('duration', 0) or 0
+    local p = math.max(0, base + sec)
+    if dur > 0 then p = math.min(p, dur - 1) end
+    pending_pos, pending_at = p, mp.get_time()
+    request('sync', { op = 'seek', pos = p })
   else
     mp.commandv('seek', tostring(sec), 'relative')
   end
