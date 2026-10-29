@@ -1,0 +1,80 @@
+# Builds Frame for Linux as one file, Frame-x86_64.AppImage, that runs on most distributions
+# (anything at least as new as Ubuntu 24.04 / Fedora 40, which includes Bazzite).
+# Runs on every push to main or by hand (Actions tab > Linux AppImage > Run workflow).
+# The AppImage appears under the run's "Artifacts"; a tag like v0.2 also puts it on a Release.
+
+name: Linux AppImage
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tools and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev \
+            libstdc++-12-dev libmpv-dev mpv file desktop-file-utils
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Linux project files
+        run: test -d linux || flutter create --platforms=linux --project-name player_test .
+
+      - name: Build
+        run: flutter build linux --release
+
+      - name: Pack the AppImage
+        run: |
+          set -e
+          APPDIR=AppDir
+          mkdir -p $APPDIR/usr/bin $APPDIR/usr/share/applications $APPDIR/usr/share/icons/hicolor/512x512/apps
+          # The app keeps its own layout next to the program (lib/ and data/ beside it).
+          cp -r build/linux/x64/release/bundle/* $APPDIR/usr/bin/
+          cp packaging/frame.desktop $APPDIR/usr/share/applications/frame.desktop
+          cp packaging/frame.png $APPDIR/usr/share/icons/hicolor/512x512/apps/frame.png
+
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh packaging/AppRun
+
+          # Every library Frame and its video player need, so nothing has to be installed.
+          LIBS=""
+          for l in $APPDIR/usr/bin/lib/*.so; do LIBS="$LIBS --library $l"; done
+          MPVLIB=$(ls /usr/lib/x86_64-linux-gnu/libmpv.so.2* | head -1)
+
+          export DEPLOY_GTK_VERSION=3
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          OUTPUT=Frame-x86_64.AppImage ./linuxdeploy-x86_64.AppImage \
+            --appdir $APPDIR \
+            --executable $APPDIR/usr/bin/player_test \
+            $LIBS --library $MPVLIB \
+            --desktop-file $APPDIR/usr/share/applications/frame.desktop \
+            --icon-file packaging/frame.png \
+            --custom-apprun packaging/AppRun \
+            --plugin gtk \
+            --output appimage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Frame-Linux
+          path: Frame-x86_64.AppImage
+
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Frame-x86_64.AppImage
