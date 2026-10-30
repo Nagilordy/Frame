@@ -1,13 +1,12 @@
 # Builds Frame for Windows and packs it into one installer, FrameSetup.exe.
-# Runs on GitHub's Windows machines: on every push to main, or by hand (Actions tab > Run).
-# The installer appears under the run's "Artifacts"; pushing a tag like v0.2 also attaches it
-# to a Release, which gives your friend a simple download link.
+# Runs on GitHub's Windows machines when a release tag like v0.3 is created (it attaches
+# FrameSetup.exe to that release), or by hand (Actions tab > Windows installer > Run workflow).
+# Uploading files to main doesn't start it.
 
 name: Windows installer
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 

@@ -17,8 +17,10 @@ quality your screen can show, including real HDR and Dolby Vision on Linux.
   - On Linux, plays in mpv with real HDR and Dolby Vision.
   - Switches to the server's converted version automatically if a device can't keep up.
 - **Remembers your audio and subtitles** per show, like Infuse (language, forced, SDH).
-- **Watch together.** Watch in sync with friends on the same server. Everyone can play, pause and
-  skip, and keeps their own subtitles and audio. Rooms show up on Home with an invite.
+- **Watch parties.** Start a party (Triangle on Home), and anything anyone plays opens for everyone,
+  in sync. Everyone can play, pause and skip, and keeps their own subtitles and audio. The party
+  stays together between videos until you leave it. Friends get an invite on their Home.
+- **Up next.** Episodes roll into the next one, across seasons.
 - **Made for controllers.** PlayStation, Xbox and Steam controllers work out of the box, with a
   button legend that matches your controller.
 - **Several servers.** Your own and a friend's, each staying signed in.

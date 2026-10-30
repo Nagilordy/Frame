@@ -1,13 +1,12 @@
 # Builds Frame for Linux as one file, Frame-x86_64.AppImage, that runs on most distributions
 # (anything at least as new as Ubuntu 24.04 / Fedora 40, which includes Bazzite).
-# Runs on every push to main or by hand (Actions tab > Linux AppImage > Run workflow).
-# The AppImage appears under the run's "Artifacts"; a tag like v0.2 also puts it on a Release.
+# Runs when a release tag like v0.3 is created (it attaches the AppImage to that release), or
+# by hand (Actions tab > Linux AppImage > Run workflow). Uploading files to main doesn't start it.
 
 name: Linux AppImage
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
