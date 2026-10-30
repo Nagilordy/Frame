@@ -8,9 +8,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'main.dart' show Jellyfin;
-import 'native_player.dart' show playerScreen;
-import 'syncplay.dart' show startWatchTogether, watchTogetherButton;
+import 'syncplay.dart' show startWatchTogether, watchTogetherButton, playOrParty;
 import 'images.dart';
+import 'movie.dart' show MovieScreen;
 import 'ui.dart';
 
 // ---------- Sorting ----------
@@ -213,9 +213,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // After watching, refresh just that title (watched tick, progress) without losing my place.
   Future<void> _open(int index) async {
     final item = _items[index];
-    final Widget screen =
-        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : playerScreen(jf, item);
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
+    if (item['Type'] == 'Series') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ShowScreen(jf: jf, series: item)));
+    } else if (item['Type'] == 'Movie') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MovieScreen(jf: jf, movie: item)));
+    } else {
+      await playOrParty(context, jf, item); // for the party when you're in one
+    }
     try {
       final fresh = await jf.item(item['Id'], fresh: true);
       if (mounted && index < _items.length && _items[index]['Id'] == item['Id']) {
@@ -875,7 +879,7 @@ class _ShowScreenState extends State<ShowScreen> {
   }
 
   Future<void> _play(dynamic episode) async {
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => playerScreen(jf, episode)));
+    await playOrParty(context, jf, episode); // for the party when you're in one
     // Back from watching: the page moves to the next episode's season (after a season finale,
     // that's the next season), with the next episode selected.
     _load(fresh: true);

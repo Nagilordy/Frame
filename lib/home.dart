@@ -13,10 +13,10 @@ import 'package:path_provider/path_provider.dart';
 
 import 'main.dart';
 import 'library.dart';
-import 'native_player.dart' show playerScreen;
+import 'movie.dart' show MovieScreen;
 import 'images.dart';
 import 'profiles.dart' show ProfileChip, ProfileStore, WhoScreen, showProfileMenu;
-import 'syncplay.dart' show TogetherPill, startWatchTogether, watchTogetherButton;
+import 'syncplay.dart' show TogetherPill, startWatchTogether, watchTogetherButton, playOrParty;
 import 'ui.dart';
 
 // ---------- Look (shared with the other screens, see ui.dart) ----------
@@ -116,6 +116,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String? _error;
   int _retriesLeft = 3;
+  // The server didn't answer at all (a NAS waking up, Wi-Fi reconnecting): keep trying quietly
+  // for about 20 seconds before showing an error.
+  int _offlineTry = 0;
+  static const _offlineWaits = [2, 3, 5, 10];
 
   Future<void> _load() async {
     Object? failure;
@@ -140,10 +144,20 @@ class _HomeScreenState extends State<HomeScreen> {
       // the screen already shows something, keep showing it.
       if (nothing && failure != null) {
         final text = errorText(failure!);
+        final login = text.contains('Sign in again');
+        if (!login && _offlineTry < _offlineWaits.length) {
+          final wait = _offlineWaits[_offlineTry++];
+          debugPrint('Home: server not answering, trying again in $wait s');
+          Timer(Duration(seconds: wait), () {
+            if (mounted) _load();
+          });
+          return; // still "Connecting…" (or the saved screen) meanwhile
+        }
         // An expired login always shows (with Sign in), even over a saved screen.
-        if ((_resume.isEmpty && _latest.isEmpty) || text.contains('Sign in again')) _error = text;
+        if ((_resume.isEmpty && _latest.isEmpty) || login) _error = text;
         return;
       }
+      _offlineTry = 0;
       _error = null;
       _resume = results[0];
       _latest = results[1];
@@ -177,6 +191,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _retry() {
+    _offlineTry = 0;
     setState(() {
       _error = null;
       _loading = true;
@@ -187,12 +202,21 @@ class _HomeScreenState extends State<HomeScreen> {
   // Movies and episodes play; a show opens its show page. Coming back refreshes Continue Watching.
   Future<void> _open(dynamic item) async {
     if (item == null) return;
-    final Widget screen =
-        item['Type'] == 'Series' ? ShowScreen(jf: jf, series: item) : playerScreen(jf, item);
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
+    if (item['Type'] == 'Series') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => ShowScreen(jf: jf, series: item)));
+    } else {
+      await playOrParty(context, jf, item); // for the party when you're in one
+    }
     // Watched something from a show: its saved pages (next episode, progress) are out of date.
     final series = item['Type'] == 'Series' ? item['Id'] : item['SeriesId'];
     if (series != null) jf.forgetShow(series.toString());
+    _load();
+  }
+
+  // Recently added: a movie opens its page first (Continue watching resumes straight away).
+  Future<void> _openDetails(dynamic item) async {
+    if (item?['Type'] != 'Movie') return _open(item);
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MovieScreen(jf: jf, movie: item)));
     _load();
   }
 
@@ -402,7 +426,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 : TvError(message: _error!, onRetry: _retry),
           )
         else if (_loading)
-          Positioned(left: 120, top: 200, child: Text('Loading your library…', style: _body(28, color: _muted)))
+          Positioned(
+              left: 120,
+              top: 200,
+              child: Text(_offlineTry > 0 ? 'Connecting to ${_serverName ?? 'your server'}…' : 'Loading your library…',
+                  style: _body(28, color: _muted)))
         else
           // The title, summary and Play button sit low over the full artwork, and move up
           // out of the way when the rows rise.
@@ -463,7 +491,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       title: 'Recently added',
                       items: _latest,
                       jf: jf,
-                      onSelect: _open,
+                      onSelect: _openDetails,
                       onFocus: _feature,
                       onActivate: () {
                         _rowIndex = 1;
@@ -654,6 +682,43 @@ class _MediaRowState extends State<_MediaRow> {
 
   List<dynamic> get items => widget.items;
   Jellyfin get jf => widget.jf;
+
+  // The row was refreshed (fresh data from the server replacing the saved screen, or after a
+  // video) while one of its cards is selected: stay on the same title wherever it moved,
+  // instead of keeping the position and silently landing on a different one.
+  @override
+  void didUpdateWidget(_MediaRow old) {
+    super.didUpdateWidget(old);
+    if (identical(old.items, widget.items) || !_nodes.anyFocused) return;
+    final was = _last < old.items.length ? old.items[_last] : null;
+    final now = was == null ? -1 : items.indexWhere((i) => i['Id'] == was['Id']);
+    if (now == _last) return; // same title in the same place
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || items.isEmpty) return;
+      if (now >= 0) {
+        _last = now;
+        _focusIndex(now);
+      } else {
+        // That title left the row (finished, say): the card now in its place, which becomes
+        // the selected one, with its artwork.
+        _last = _last.clamp(0, items.length - 1);
+        _focusIndex(_last);
+        widget.onFocus(items[_last]);
+      }
+    });
+  }
+
+  // Selects a card, scrolling to it first if it's off screen (cards off screen aren't built).
+  void _focusIndex(int i) {
+    if (focusOn(_nodes[i])) return;
+    if (_scroll.hasClients) {
+      final p = _scroll.position;
+      _scroll.jumpTo((i * (cardW + 30) - 120).clamp(p.minScrollExtent, p.maxScrollExtent));
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) focusOn(_nodes[i]);
+    });
+  }
 
   // Called when the controller moves into this row from above or below.
   bool focusRow() {

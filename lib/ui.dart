@@ -170,6 +170,10 @@ class Surface extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final column = Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+      if (accentLine) Container(height: 4, color: kAccent),
+      Flexible(child: Padding(padding: padding ?? EdgeInsets.zero, child: child)),
+    ]);
     return Container(
       width: width,
       clipBehavior: Clip.antiAlias,
@@ -178,10 +182,12 @@ class Surface extends StatelessWidget {
         borderRadius: BorderRadius.circular(radius),
         boxShadow: const [BoxShadow(color: Color(0x99000000), blurRadius: 100, offset: Offset(0, 40))],
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-        if (accentLine) Container(height: 4, color: kAccent),
-        Flexible(child: Padding(padding: padding ?? EdgeInsets.zero, child: child)),
-      ]),
+      // With no width from its place on screen (a box pinned only by a corner, like the
+      // player's info box), size to the content: stretching to an unlimited width fails and the
+      // box doesn't show at all.
+      child: LayoutBuilder(
+        builder: (context, constraints) => constraints.hasBoundedWidth ? column : IntrinsicWidth(child: column),
+      ),
     );
   }
 }

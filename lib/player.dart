@@ -197,7 +197,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     perfLog('player: ${widget.item['Name']} · ${await p('width')}x${await p('height')}'
         ' · ${_server ? 'server version' : 'original file'} · decoder ${await p('hwdec-current')}'
-        ' · fps ${await p('estimated-vf-fps')} on ${await p('display-fps')} Hz'
+        ' · fps ${await p('estimated-vf-fps')}'
         ' · dropped ${await p('frame-drop-count')} (decoder ${await p('decoder-frame-drop-count')})'
         ' · buffered ${await p('demuxer-cache-duration')} s · step $_level');
   }
@@ -496,6 +496,148 @@ class _PlayerScreenState extends State<PlayerScreen> {
         language: s['Language'],
       );
 
+  // ---------- Up next (same rules as the mpv player) ----------
+  //
+  // Near the end of an episode a card offers the next one (from where the credits start when
+  // the server knows, otherwise 30 s before the end): Cross / Enter plays it now, Circle /
+  // Escape hides the card. At the end, the next episode starts by itself.
+
+  dynamic _next;
+  double? _creditsAt;
+  bool _nextDismissed = false;
+  bool _continuing = false;
+
+  Future<void> _findNext() async {
+    if (widget.item['Type'] != 'Episode') return;
+    try {
+      final results = await Future.wait([
+        widget.jf.episodeAfter(widget.item),
+        widget.jf.creditsStart(_id),
+      ]).timeout(const Duration(seconds: 4));
+      if (!mounted) return;
+      setState(() {
+        _next = results[0];
+        _creditsAt = results[1] as double?;
+      });
+    } catch (e) {
+      debugPrint('Player: next episode unknown ($e)');
+    }
+  }
+
+  // Seconds left and the card's full span, while the card shows; null otherwise.
+  (double, double)? _upNextAt(Duration position) {
+    if (_next == null || _nextDismissed || _continuing) return null;
+    final dur = player.state.duration.inMilliseconds / 1000;
+    if (dur < 60) return null;
+    final at = _creditsAt ?? dur - 30;
+    final pos = position.inMilliseconds / 1000;
+    if (pos < at) return null;
+    return ((dur - pos).clamp(0, dur).toDouble(), (dur - at).clamp(1, dur).toDouble());
+  }
+
+  bool get _upNextShowing => _upNextAt(player.state.position) != null;
+
+  void _onEnded() {
+    if (_continuing) return;
+    if (_next != null && !_nextDismissed) {
+      final sync = widget.sync;
+      if (sync == null || sync.isHost) {
+        _playNext();
+      }
+      return; // others in a room wait for the room's next video
+    }
+    Navigator.of(context).maybePop();
+  }
+
+  Future<void> _playNext() async {
+    final next = _next;
+    if (next == null || _continuing || !mounted) return;
+    final sync = widget.sync;
+    if (sync != null) {
+      // The room's new video reaches everyone, this player included.
+      try {
+        await sync.play(next['Id'].toString(), 0);
+      } catch (e) {
+        debugPrint('Player: next episode for the room failed: $e');
+      }
+      return;
+    }
+    _continuing = true;
+    final series = widget.item['SeriesId'];
+    if (series != null) widget.jf.forgetShow(series.toString());
+    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => PlayerScreen(jf: widget.jf, item: next)));
+  }
+
+  Widget _upNextCard() {
+    return Positioned(
+      right: 56,
+      bottom: 230,
+      child: StreamBuilder<Duration>(
+        stream: player.stream.position,
+        initialData: player.state.position,
+        builder: (_, snap) {
+          final at = _upNextAt(snap.data ?? Duration.zero);
+          if (at == null || _panel != _Panel.none) return const SizedBox.shrink();
+          final (left, span) = at;
+          return GestureDetector(
+            onTap: _playNext,
+            child: Container(
+              width: 600,
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A1E25),
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: const [BoxShadow(color: Color(0x8C000000), blurRadius: 60, offset: Offset(0, 20))],
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Container(height: 4, color: kAccent),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(28, 18, 28, 20),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('UP NEXT', style: _body(15, weight: FontWeight.w700, color: _muted)),
+                    const SizedBox(height: 6),
+                    Text(_episodeTitle(_next), maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(24, weight: FontWeight.w700)),
+                    const SizedBox(height: 14),
+                    Row(children: [
+                      Container(
+                        height: 44,
+                        padding: const EdgeInsets.only(left: 16, right: 22),
+                        decoration: BoxDecoration(color: _fg, borderRadius: BorderRadius.circular(22)),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.play_arrow_rounded, size: 26, color: _bg),
+                          const SizedBox(width: 6),
+                          Text('Play now', style: _body(20, weight: FontWeight.w700, color: _bg)),
+                        ]),
+                      ),
+                      if (padActive.value && !_controls) ...[
+                        const SizedBox(width: 22),
+                        Text('Select: play now   ·   Back: hide', style: _body(17, color: _soft)),
+                      ],
+                    ]),
+                  ]),
+                ),
+                // Runs down to the end of the episode, when the next one starts by itself.
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: (left / span).clamp(0.0, 1.0),
+                    child: Container(height: 4, color: kAccent),
+                  ),
+                ),
+              ]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  static String _episodeTitle(dynamic ep) => [
+        if (ep['ParentIndexNumber'] != null) 'S${ep['ParentIndexNumber']}',
+        if (ep['IndexNumber'] != null) 'E${ep['IndexNumber']}',
+        ep['Name'] ?? '',
+      ].join(' · ');
+
   // ---------- Watch together ----------
   RoomLink? _room;
 
@@ -581,8 +723,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // The file's tracks are known: pick the remembered audio and subtitles.
     _subs.add(player.stream.tracks.listen((_) => _applyTrackPrefs()));
     // Close the player when the video ends.
+    // The video ended: the next episode, or back.
     _subs.add(player.stream.completed.listen((done) {
-      if (done && mounted) Navigator.of(context).maybePop();
+      if (done && mounted) _onEnded();
     }));
     // mpv also reports small, harmless problems here, so an error only counts if the video
     // still hasn't started a few seconds later.
@@ -612,6 +755,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (mounted) _failFocus.requestFocus();
     });
   }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_registered) {
+      _registered = true;
+      widget.sync?.playerOpened(widget.playlistItemId); // watching the party's video
+    }
+  }
+
+  bool _registered = false;
 
   final _failFocus = FocusNode();
 
@@ -681,7 +835,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
     await _tracks.load();
     // Original file or the server's version (see "Original file or the server's version").
-    final wantServer = _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
+    // Disc images and disc folders (ISO, Blu-ray, DVD) can't be streamed as one file.
+    final item = widget.item;
+    final disc = (item['VideoType'] ?? 'VideoFile') != 'VideoFile' ||
+        ['iso', 'bluray', 'dvd'].contains((item['Container'] ?? '').toString().toLowerCase());
+    final wantServer = disc || _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
     if (wantServer) _presetServerTracks();
     // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
     final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
@@ -708,6 +866,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
     _lastSeek = DateTime.now(); // the start itself can drop a frame or two
     _adaptTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkSmoothness());
+    unawaited(_findNext());
     if (mounted) _playFocus.requestFocus();
   }
 
@@ -723,6 +882,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _adaptTimer?.cancel();
     _saveLearnedLevel();
     _room?.dispose();
+    widget.sync?.playerClosed(); // still in the party, just not watching
     _failFocus.dispose();
     if (_failure == null || _session != null) widget.jf.reportStopped(_id, _ticksNow, session: _session);
     player.dispose();
@@ -907,6 +1067,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return KeyEventResult.ignored; // arrows + Enter move inside the panel
     }
 
+    // Up next showing over the picture: Select plays it, Back hides the card.
+    if (!_controls && _upNextShowing) {
+      if (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.select) {
+        _playNext();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace) {
+        setState(() => _nextDismissed = true);
+        return KeyEventResult.handled;
+      }
+    }
+
     if (!_controls) {
       if (key == LogicalKeyboardKey.arrowLeft) {
         _skip(-_back);
@@ -916,8 +1088,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _skip(_forward);
         return KeyEventResult.handled;
       }
+      // Back with the controls hidden brings them back (a second Back leaves): one stray press
+      // no longer ends the video.
       if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace) {
-        Navigator.of(context).maybePop();
+        _showControls(focusPlay: true);
         return KeyEventResult.handled;
       }
       // Any other key brings the controls back, with Play/Pause selected.
@@ -925,9 +1099,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       return KeyEventResult.handled;
     }
 
-    // Controls are visible: keys move between buttons, and keep the controls up.
+    // Controls are visible: keys move between buttons, and keep the controls up. Back leaves.
     if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace) {
-      _hideControls();
+      Navigator.of(context).maybePop();
       return KeyEventResult.handled;
     }
     _scheduleHide();
@@ -959,7 +1133,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 const PadHint(PadButton.select, 'Select'),
                 const PadHint(PadButton.playPause, 'Play/Pause'),
                 const PadHint(PadButton.skip, 'Skip'),
-                const PadHint(PadButton.back, 'Hide'),
+                const PadHint(PadButton.back, 'Exit'),
                 if (isDesktop) fullScreenHint(),
               ]
             : const <PadHint>[];
@@ -1038,6 +1212,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ),
 
+            if (_next != null) _upNextCard(),
             if (_info) _infoBox(),
             if (_panel != _Panel.none) _trackPanel(),
             if (_failure != null) _failureBox(),

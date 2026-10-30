@@ -18,6 +18,7 @@ import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
+import 'syncplay.dart' show SyncPlay;
 import 'ui.dart' show isDesktop, toggleFullScreen;
 
 Future<void> main() async {
@@ -28,9 +29,9 @@ Future<void> main() async {
     await windowManager.setTitle('Frame');
   }
   await Jellyfin.loadDeviceIdentity();
+  // Looking for mpv runs alongside startup instead of before it (see findMpv).
   final mpvSearch = Stopwatch()..start();
-  await findMpv();
-  perfLog('looking for mpv took ${mpvSearch.elapsedMilliseconds} ms');
+  findMpv().then((_) => perfLog('looking for mpv took ${mpvSearch.elapsedMilliseconds} ms (in the background)'));
   tidyArtworkCache();
   // Keep more artwork in memory so going back to a card shows it instantly.
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
@@ -67,6 +68,7 @@ class _TestAppState extends State<TestApp> {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKey);
     GamepadInput.start();
+    SyncPlay.navigator = _navigator; // a video someone starts in your party can open from anywhere
   }
 
   @override
@@ -178,7 +180,7 @@ class Jellyfin {
   }
 
   static String get _client =>
-      'MediaBrowser Client="Frame", Device="$_deviceName", DeviceId="$_deviceId", Version="0.2"';
+      'MediaBrowser Client="Frame", Device="$_deviceName", DeviceId="$_deviceId", Version="0.3"';
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
@@ -357,15 +359,61 @@ class Jellyfin {
 
   static const _homeFields = 'MediaStreams,Overview,ProductionYear';
 
-  // What I was watching: Continue Watching.
+  // Continue watching: what I stopped part-way through, plus the next episode of the shows
+  // I'm following (finish an episode and the next one is waiting here). Newest activity first.
   Future<List<dynamic>> resume() async {
     final q = {'Limit': '16', 'MediaTypes': 'Video', 'Fields': _homeFields};
-    final data = await _getJson([
+    final partWay = _getJson([
       Uri.parse('$server/UserItems/Resume').replace(queryParameters: {...q, 'userId': userId!}),
       Uri.parse('$server/Users/$userId/Items/Resume').replace(queryParameters: q),
     ]);
-    return data['Items'] as List;
+    // The next episodes and when each show was last watched are extras: if the server can't
+    // answer them, Continue watching still shows what's part-way.
+    final nextUp = _getJson([
+      Uri.parse('$server/Shows/NextUp').replace(queryParameters: {
+        'userId': userId!,
+        'Limit': '16',
+        'Fields': _homeFields,
+        'EnableResumable': 'false', // part-way episodes already come from the list above
+        'DisableFirstEpisode': 'true', // not episode 1 of shows I never started
+        'EnableRewatching': 'false',
+      }),
+    ]).then<List<dynamic>>((d) => d['Items'] as List, onError: (Object e) {
+      debugPrint('Jellyfin: next episodes unavailable ($e)');
+      return <dynamic>[];
+    });
+    final lastWatched = _getJson([
+      Uri.parse('$server/Items').replace(queryParameters: _recentEpisodesQuery(withUser: true)),
+      Uri.parse('$server/Users/$userId/Items').replace(queryParameters: _recentEpisodesQuery(withUser: false)),
+    ]).then<Map<String, String>>((d) {
+      final when = <String, String>{};
+      for (final e in d['Items'] as List) {
+        final series = e['SeriesId']?.toString();
+        final data = e['UserData'];
+        final date = data is Map ? data['LastPlayedDate']?.toString() : null;
+        if (series != null && date != null && (when[series] ?? '').compareTo(date) < 0) when[series] = date;
+      }
+      return when;
+    }, onError: (Object e) => <String, String>{});
+
+    final part = (await partWay)['Items'] as List;
+    final next = await nextUp;
+    final seriesWatched = await lastWatched;
+    return mergeContinueWatching(part, next, seriesWatched);
   }
+
+  // The episodes I finished most recently, to know when each show was last watched.
+  Map<String, String> _recentEpisodesQuery({required bool withUser}) => {
+        if (withUser) 'userId': userId!,
+        'IncludeItemTypes': 'Episode',
+        'Recursive': 'true',
+        'Filters': 'IsPlayed',
+        'SortBy': 'DatePlayed',
+        'SortOrder': 'Descending',
+        'Limit': '60',
+        'Fields': 'ParentId',
+        'EnableImages': 'false',
+      };
 
   // Recently added movies and shows.
   Future<List<dynamic>> latest() async {
@@ -483,6 +531,37 @@ class Jellyfin {
         return data['Items'] as List;
       });
 
+  // The episode right after [episode] in its show (across seasons), or null at the end.
+  Future<dynamic> episodeAfter(dynamic episode) async {
+    final seriesId = episode['SeriesId'];
+    if (episode['Type'] != 'Episode' || seriesId == null) return null;
+    final data = await _getJson([
+      Uri.parse('$server/Shows/$seriesId/Episodes').replace(queryParameters: {
+        'userId': userId!,
+        'startItemId': episode['Id'].toString(),
+        'limit': '2',
+        'Fields': 'MediaStreams,Overview',
+      }),
+    ]);
+    final items = data['Items'] as List;
+    if (items.length < 2 || items.first['Id'] != episode['Id']) return null;
+    return items[1];
+  }
+
+  // Where the end credits start, in seconds, when the server knows (Jellyfin 10.10+ with an
+  // intro/credits detection plugin). Null otherwise.
+  Future<double?> creditsStart(String itemId) async {
+    try {
+      final data = await _getJson([
+        Uri.parse('$server/MediaSegments/$itemId').replace(queryParameters: {'includeSegmentTypes': 'Outro'}),
+      ]);
+      for (final s in (data['Items'] as List? ?? [])) {
+        if (s['Type'] == 'Outro' && s['StartTicks'] is int) return (s['StartTicks'] as int) / 10000000;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   // The episode to watch next in a show, or null.
   Future<dynamic> nextUp(String seriesId, {bool fresh = false}) => _cached('next:$seriesId', fresh, () async {
         try {
@@ -528,6 +607,20 @@ class Jellyfin {
       } catch (_) {}
     }
     throw "Couldn't mark it as watched.";
+  }
+
+  // Marks it as not watched (and forgets where you stopped).
+  Future<void> markUnplayed(String id) async {
+    for (final uri in [
+      Uri.parse('$server/UserPlayedItems/$id').replace(queryParameters: {'userId': userId!}),
+      Uri.parse('$server/Users/$userId/PlayedItems/$id'),
+    ]) {
+      try {
+        final res = await _send(_http.delete(uri, headers: _headers));
+        if (res.statusCode >= 200 && res.statusCode < 300) return;
+      } catch (_) {}
+    }
+    throw "Couldn't mark it as not watched.";
   }
 
   // ---------- Artwork ----------
@@ -707,4 +800,26 @@ class Jellyfin {
   // static=true asks Jellyfin for the original file: no transcoding on the NAS.
   String directStreamUrl(String itemId) =>
       '$server/Videos/$itemId/stream?static=true&ApiKey=$token';
+}
+
+// Continue watching: part-way items and next episodes, newest activity first, one per show.
+// [seriesWatched]: when each show (by id) last had an episode finished.
+List<dynamic> mergeContinueWatching(List<dynamic> part, List<dynamic> next, Map<String, String> seriesWatched) {
+  // One entry per show: a part-way episode wins over the next one.
+  final shows = <dynamic>{for (final i in part) if (i['SeriesId'] != null) i['SeriesId']};
+  String activity(dynamic i) {
+    if (part.contains(i)) {
+      final data = i['UserData'];
+      return data is Map ? (data['LastPlayedDate'] ?? '').toString() : '';
+    }
+    return seriesWatched[i['SeriesId']?.toString()] ?? '';
+  }
+  final merged = [...part, ...next.where((e) => !shows.contains(e['SeriesId']))];
+  // Newest first; the sort keeps the server's own order between equal dates.
+  final order = {for (var i = 0; i < merged.length; i++) merged[i]: i};
+  merged.sort((a, b) {
+    final c = activity(b).compareTo(activity(a));
+    return c != 0 ? c : order[a]!.compareTo(order[b]!);
+  });
+  return merged.take(16).toList();
 }

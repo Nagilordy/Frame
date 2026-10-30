@@ -1,7 +1,7 @@
 name: player_test
 description: Test app - connect to Jellyfin and play a file directly with mpv.
 publish_to: "none"
-version: 0.2.0
+version: 0.3.0
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -31,6 +31,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/mpv/frame_ui.lua
+    - assets/mpv/frame_bridge.lua
   # Fonts are built into the app (no download on first launch, no flash of a fallback font).
   # Both are free under the SIL Open Font License; the licenses sit next to the files.
   fonts:

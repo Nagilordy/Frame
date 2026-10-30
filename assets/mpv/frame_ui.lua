@@ -26,7 +26,9 @@ local BODY = 'Hanken Grotesk'
 local DISPLAY = 'Sora'
 
 local state = {
-  visible = true,
+  visible = false,
+  loading = true,        -- the loading screen, until the video starts (see below)
+  loading_fade = nil,    -- when the fade into the video began
   zone = 'buttons',      -- back | bar | buttons | panel
   button = 2,            -- which bottom button has focus
   panel = nil,           -- nil | 'playback' | 'audio' | 'subtitles'
@@ -380,7 +382,7 @@ local function pad_legend(ass)
   if state.panel then
     items = { { 'select', 'Select' }, { 'back', 'Close' } }
   else
-    items = { { 'select', 'Select' }, { 'menu', 'Play/Pause' }, { 'skip', 'Skip' }, { 'back', 'Hide' } }
+    items = { { 'select', 'Select' }, { 'menu', 'Play/Pause' }, { 'skip', 'Skip' }, { 'back', 'Exit' } }
   end
   -- measure roughly: glyph 30 + gap 10 + label ~11 px per character + 26 between items
   local width = 36
@@ -485,10 +487,88 @@ local function notice_and_waiting(ass)
   if w > 1 then rect(ass, x0 + 6, y + 80, x0 + 6 + w, y + 84, 0, left and accent_colour() or '3BA2F0', '00') end
 end
 
+-- ---------- Up next ----------
+-- Near the end of an episode: a card with the next one. Cross plays it now, Circle hides it.
+-- Frame sends the title and, when the server knows where the credits start, from when.
+
+local function up_next()
+  local n = state.info.next
+  if type(n) ~= 'table' or state.next_hidden then return nil end
+  local dur = mp.get_property_number('duration', 0) or 0
+  if dur < 60 then return nil end
+  local pos = mp.get_property_number('time-pos', 0) or 0
+  local at = tonumber(n.at) or (dur - 30)
+  if pos < at then return nil end
+  return n, math.max(0, dur - pos), math.max(1, dur - at)
+end
+
+local function draw_up_next(ass)
+  local n, left, span = up_next()
+  if not n or state.panel then return end
+  local w, h = 600, 160
+  local x1 = W - 56
+  local y1 = state.visible and (H - 250) or (H - 56)
+  local x0, y0 = x1 - w, y1 - h
+  glass(ass, x0, y0, x1, y1, 14, nil, true)
+  text(ass, x0 + 28, y0 + 34, 4, BODY, 15, 700, MUTED, 'UP NEXT')
+  text(ass, x0 + 28, y0 + 66, 4, BODY, 24, 700, FG, n.title or 'Next episode')
+  -- Play now: a white pill with a play shape
+  local px0, py0, px1, py1 = x0 + 24, y0 + 96, x0 + 210, y0 + 140
+  rect(ass, px0, py0, px1, py1, 22, FG, '00')
+  path(ass, BG, { { px0 + 26, py0 + 12 }, { px0 + 44, py0 + 22 }, { px0 + 26, py0 + 32 } })
+  text(ass, px0 + 56, (py0 + py1) / 2, 4, BODY, 20, 700, BG, 'Play now')
+  hit('next', px0, py0, px1, py1, function() request('next') end)
+  -- what the controller buttons do here (only while the controls are hidden)
+  if not state.visible and state.pad ~= 'none' then
+    local ps = state.pad == 'ps'
+    text(ass, px1 + 24, (py0 + py1) / 2, 4, BODY, 18, 600, SOFT,
+      (ps and '✕' or 'A') .. ' Play now     ' .. (ps and '○' or 'B') .. ' Hide')
+  end
+  -- the line runs down to the end of the episode, when the next one starts by itself
+  rect(ass, x0 + 6, y1 - 4, x1 - 6, y1, 0, FG, 'EB')
+  local lw = (x1 - x0 - 12) * math.max(0, math.min(1, left / span))
+  if lw > 1 then rect(ass, x0 + 6, y1 - 4, x0 + 6 + lw, y1, 0, accent_colour(), '00') end
+end
+
+-- The loading screen. Frame shows the same one before the player opens (the title logo
+-- centred in a 900 x 160 box at y = 500, the line under it at y = 620, a thin running line at
+-- y = 680), so going from Frame to the player can't be seen. Frame places the logo itself (a
+-- picture, which these controls can't draw) and says so with info.logo; without one, the
+-- title is written in its place. When the video starts, the screen fades into it.
+local started = mp.get_time()
+local function draw_loading(ass)
+  local a = 0
+  if state.loading_fade then a = math.min(1, (mp.get_time() - state.loading_fade) / 0.5) end
+  local function alpha(base) -- base see-through (0-255), faded further as the screen goes
+    return string.format('%02X', math.floor(base + (255 - base) * a))
+  end
+  rect(ass, 0, 0, W, H, 0, BG, alpha(0))
+  -- (while Frame is still preparing the logo, briefly nothing, rather than the title flashing)
+  local waiting_logo = state.info.logo_coming and mp.get_time() - started < 2
+  if not state.info.logo and not waiting_logo then
+    text(ass, W / 2, 500, 5, DISPLAY, 64, 700, FG, state.info.title or mp.get_property('media-title') or '', alpha(0))
+  end
+  local line = state.info.loading_line
+  if line and line ~= '' then text(ass, W / 2, 621, 5, BODY, 26, 500, SOFT, line, alpha(0)) end
+  -- a short accent segment running along a faint track, like Frame's
+  local x0, x1, y = W / 2 - 120, W / 2 + 120, 680
+  rect(ass, x0, y - 2, x1, y + 2, 2, FG, alpha(225))
+  local t = (mp.get_time() % 1.6) / 1.6
+  local s0 = x0 + (x1 - x0) * math.max(0, t * 1.4 - 0.4)
+  local s1 = x0 + (x1 - x0) * math.min(1, t * 1.4)
+  if s1 - s0 > 2 then rect(ass, s0, y - 2, s1, y + 2, 2, accent_colour(), alpha(0)) end
+end
+
 local function render()
   state.hits = {}
   state.panel_rect = nil
   local ass = assdraw.ass_new()
+  if state.loading or state.loading_fade then
+    draw_loading(ass)
+    overlay.data = ass.text
+    overlay:update()
+    return
+  end
   if state.visible then
     local pos = mp.get_property_number('time-pos', 0) or 0
     local dur = mp.get_property_number('duration', 0) or 0
@@ -571,6 +651,7 @@ local function render()
     if state.panel then draw_panel(ass) end
     pad_legend(ass)
   end
+  draw_up_next(ass)
   notice_and_waiting(ass)
   overlay.data = ass.text
   overlay:update()
@@ -615,12 +696,27 @@ function activate()
 end
 
 local function key(k)
+  -- Still loading: only Back works (it leaves, like backing out of Frame's loading screen).
+  if state.loading then
+    if k == 'back' then mp.command('quit') end
+    return
+  end
   -- Keyboard or controller in use: the mouse no longer holds the controls open.
   state.hover, state.hover_x = nil, nil
+  -- Up next showing over the picture: Cross plays it, Circle hides the card.
+  if not state.visible and up_next() then
+    if k == 'select' then request('next') return end
+    if k == 'back' then
+      state.next_hidden = true
+      request('next_dismiss')
+      render()
+      return
+    end
+  end
   if not state.visible then
     if k == 'left' or k == 'rew' then seek_by(-10)
     elseif k == 'right' or k == 'ff' then seek_by(30)
-    elseif k == 'back' then mp.command('quit') return
+    elseif k == 'back' then show(true) return   -- one Back shows the controls; a second one leaves
     elseif k == 'playpause' then toggle_pause()
     elseif k == 'info' then state.info_box = not state.info_box end
     show(true)
@@ -644,7 +740,7 @@ local function key(k)
     return
   end
 
-  if k == 'back' then hide() return end
+  if k == 'back' then mp.command('quit') return end
   if state.zone == 'buttons' then
     if k == 'left' then state.button = math.max(1, state.button - 1)
     elseif k == 'right' then state.button = math.min(#buttons, state.button + 1)
@@ -665,6 +761,9 @@ end
 
 mp.register_script_message('key', key)
 mp.register_script_message('pad', function(style) state.pad = style or 'none'; render() end)
+mp.observe_property('user-data/frame/pad', 'string', function(_, style)
+  if style and style ~= '' then state.pad = style; render() end
+end)
 local notice_timer = nil
 mp.register_script_message('notice', function(text)
   state.notice, state.notice_until = text, mp.get_time() + 3.5
@@ -711,8 +810,22 @@ local function in_panel(x, y)
   return r and x >= r[1] and x <= r[3] and y >= r[2] and y <= r[4]
 end
 
+-- Real mouse use switches the legend off; a pointer resting over the video or a light touch of
+-- a controller's trackpad doesn't (it needs a good 200 px of movement, like in Frame).
+local mouse_last, mouse_travel = nil, 0
+
 local function on_mouse_move()
-  if state.pad ~= 'none' then state.pad = 'none' end
+  if state.loading then return end
+  if state.pad ~= 'none' then
+    local mx, my = mp.get_mouse_pos()
+    if mx and mouse_last then
+      mouse_travel = mouse_travel + math.abs(mx - mouse_last[1]) + math.abs(my - mouse_last[2])
+    end
+    mouse_last = mx and { mx, my } or nil
+    if mouse_travel < 200 then return end
+    state.pad = 'none'
+  end
+  mouse_travel = 0
   local was_visible = state.visible
   if not was_visible then state.visible = true; render() end
   local x, y = mouse_xy()
@@ -736,7 +849,13 @@ mp.add_forced_key_binding('MOUSE_LEAVE', 'frame_mouse_leave', function()
 end)
 
 mp.add_forced_key_binding('MBTN_LEFT', 'frame_click', function()
-  if not state.visible then show(true) return end
+  if state.loading then return end
+  if not state.visible then
+    local h = hit_at(mouse_xy())
+    if h and h.id == 'next' then h[5]() return end
+    show(true)
+    return
+  end
   local x, y = mouse_xy()
   if state.panel then
     if in_panel(x, y) then
@@ -775,11 +894,44 @@ mp.add_forced_key_binding('WHEEL_UP', 'frame_wheel_up', function() wheel(-1) end
 mp.add_forced_key_binding('WHEEL_DOWN', 'frame_wheel_down', function() wheel(1) end, { repeatable = true })
 
 -- Keep the clock and progress bar current while the controls are up.
-mp.add_periodic_timer(0.25, function() if state.visible then render() end end)
+-- (and the Up next card, which also shows while the controls are hidden)
+local up_next_shown = false
+mp.add_periodic_timer(0.25, function()
+  local showing = up_next() ~= nil
+  if state.visible or showing or up_next_shown then render() end
+  up_next_shown = showing
+end)
 mp.observe_property('pause', 'bool', function(_, paused)
+  if state.loading then return end
   if paused then show() else schedule_hide() end
 end)
-mp.register_event('file-loaded', function() show(true) end)
+
+-- Loading: redraw often so the line runs, until the first picture is on screen; then fade
+-- into the video and bring up the controls for a moment, as before.
+local loading_timer = mp.add_periodic_timer(0.04, function() render() end)
+local function finish_loading()
+  if not state.loading then return end
+  state.loading, state.loading_fade = false, mp.get_time()
+  state.logo_gone = true
+  request('loaded', true) -- Frame takes its logo off (a picture can't fade with the rest)
+  mp.add_timeout(0.5, function()
+    state.loading_fade = nil
+    loading_timer:kill()
+    state.zone, state.button = 'buttons', 2
+    show(true)
+  end)
+end
+mp.register_event('playback-restart', finish_loading)
+mp.add_timeout(20, finish_loading) -- never stuck behind the loading screen
+-- A different video in the same player (a room moving on): back to the loading screen.
+mp.register_event('start-file', function()
+  if state.loading_fade then return end
+  if mp.get_property_native('playlist-pos', 0) > 0 or state.logo_gone then
+    state.loading, state.visible, state.panel = true, false, nil
+    state.info.logo, state.info.logo_coming = false, false -- the logo was for the first video
+    loading_timer:resume()
+  end
+end)
 -- Frame's news (who's in the room, waiting for everyone): redraw so it shows at once.
 mp.observe_property('user-data/frame/info', 'native', function() render() end)
 -- Keep 1080 units of height and widen or narrow the canvas to the window's shape, so the

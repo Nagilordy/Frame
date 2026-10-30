@@ -14,7 +14,7 @@ import 'dart:io';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
-import 'ui.dart' show focusLabels;
+import 'ui.dart' show focusLabels, fullScreen;
 
 class AppLog {
   AppLog(this.name);
@@ -75,7 +75,12 @@ class PerfRecorder {
     }
   }
 
+  /// True while Frame's window is hidden behind the mpv player: its frames then just wait
+  /// for a window nobody sees, and would show up as huge false "slow frames".
+  static bool hidden = false;
+
   static void _onTimings(List<FrameTiming> timings) {
+    if (hidden) return;
     final budget = _budgetUs;
     for (final t in timings) {
       final build = t.buildDuration.inMicroseconds;
@@ -102,9 +107,14 @@ class PerfRecorder {
     if (_frames == 0) return;
     String ms(int us) => (us / 1000).toStringAsFixed(1);
     final rss = (ProcessInfo.currentRss / (1024 * 1024)).round();
+    var window = '?';
+    try {
+      final size = WidgetsBinding.instance.platformDispatcher.views.first.physicalSize;
+      window = '${size.width.round()}x${size.height.round()}${fullScreen.value ? ' full screen' : ''}';
+    } catch (_) {}
     perfLog('$_frames frames, avg ${ms(_sumTotalUs ~/ _frames)} ms, slowest build ${ms(_maxBuildUs)} ms '
         '/ draw ${ms(_maxRasterUs)} ms, $_janky over budget (${ms(_budgetUs.round())} ms)'
-        '${_janky > 0 ? ', worst ${ms(_worstUs)} ms at ${_worstWhere ?? '?'}' : ''}, memory $rss MB');
+        '${_janky > 0 ? ', worst ${ms(_worstUs)} ms at ${_worstWhere ?? '?'}' : ''}, memory $rss MB, window $window');
     _frames = _janky = _maxBuildUs = _maxRasterUs = _sumTotalUs = _worstUs = 0;
     _worstWhere = null;
   }

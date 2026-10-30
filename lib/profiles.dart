@@ -20,6 +20,7 @@ import 'home.dart' show HomeScreen;
 import 'images.dart' show netImage;
 import 'keyboard.dart' show TvTextField;
 import 'main.dart' show Jellyfin;
+import 'syncplay.dart' show SyncPlay, startParty, showPartyMenu;
 import 'ui.dart';
 
 // ---------- What Frame remembers ----------
@@ -1242,7 +1243,7 @@ Future<void> showProfileMenu(BuildContext context, Jellyfin jf) {
     barrierLabel: 'Close',
     barrierColor: const Color(0x8C06080B),
     transitionDuration: const Duration(milliseconds: 180),
-    pageBuilder: (ctx, _, __) => _ProfileMenu(jf: jf),
+    pageBuilder: (ctx, _, __) => _ProfileMenu(jf: jf, home: context),
     transitionBuilder: (ctx, a, _, child) => FadeTransition(
       opacity: CurvedAnimation(parent: a, curve: Curves.easeOut),
       child: SlideTransition(
@@ -1255,8 +1256,9 @@ Future<void> showProfileMenu(BuildContext context, Jellyfin jf) {
 }
 
 class _ProfileMenu extends StatefulWidget {
-  const _ProfileMenu({required this.jf});
+  const _ProfileMenu({required this.jf, required this.home});
   final Jellyfin jf;
+  final BuildContext home; // the screen behind (banners and the party menu open there)
 
   @override
   State<_ProfileMenu> createState() => _ProfileMenuState();
@@ -1276,7 +1278,21 @@ class _ProfileMenuState extends State<_ProfileMenu> {
 
   Jellyfin get jf => widget.jf;
 
-  void _switch() => _openWho(context, jf.server);
+  // Another profile or signing out ends this profile's party first.
+  void _switch() {
+    SyncPlay.of(jf).leave();
+    _openWho(context, jf.server);
+  }
+
+  void _party() {
+    final ctx = widget.home;
+    Navigator.of(context).pop();
+    if (SyncPlay.of(jf).inParty) {
+      showPartyMenu(ctx, jf);
+    } else {
+      startParty(ctx, jf);
+    }
+  }
 
   void _server() {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => ServerScreen(current: jf.server)));
@@ -1291,6 +1307,7 @@ class _ProfileMenuState extends State<_ProfileMenu> {
     try {
       await jf.postPath('/Sessions/Logout').timeout(const Duration(seconds: 4));
     } catch (_) {}
+    await SyncPlay.of(jf).leave();
     if (jf.userId != null) await ProfileStore.forget(jf.userId!, jf.server);
     if (mounted) _openWho(context, jf.server);
   }
@@ -1360,7 +1377,9 @@ class _ProfileMenuState extends State<_ProfileMenu> {
                             ),
                           ]),
                         ),
-                        _item(Icons.people_outline_rounded, 'Switch profile', _switch, autofocus: true),
+                        _item(Icons.groups_rounded, SyncPlay.of(jf).inParty ? 'Your watch party' : 'Start a watch party', _party,
+                            autofocus: true),
+                        _item(Icons.people_outline_rounded, 'Switch profile', _switch),
                         _item(Icons.dns_outlined, 'Server', _server),
                         const SizedBox(height: 8),
                         _item(Icons.logout_rounded, _confirmSignOut ? 'Press again to sign out' : 'Sign out of $name', _signOut,

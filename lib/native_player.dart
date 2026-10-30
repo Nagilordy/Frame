@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,7 +25,8 @@ import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHint, PadButton, Pa
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
 import 'syncplay.dart' show SyncPlay, RoomLink;
-import 'perf.dart' show perfLog;
+import 'images.dart' show netImage, LogoImage, logoNeedsMatte;
+import 'perf.dart' show perfLog, PerfRecorder;
 import 'tracks.dart';
 import 'ui.dart';
 
@@ -87,7 +89,35 @@ Future<double> _cachedVersionOf(String path) async {
 /// Looks for mpv once at startup: Frame's own copy first, then one bundled next to Frame,
 /// then the system's. If the best one is too old for HDR, Frame fetches a current mpv in the
 /// background and switches to it as soon as it's ready (no install, nothing to set up).
+/// Frame's window opens without waiting for this: it finishes in the background (asking mpv
+/// its version can take seconds right after mpv was updated). A video started before it's done
+/// waits for it (see playerScreen).
+final _mpvSearch = Completer<void>();
+
 Future<void> findMpv() async {
+  try {
+    await _findMpv();
+  } finally {
+    if (!_mpvSearch.isCompleted) _mpvSearch.complete();
+  }
+}
+
+Future<void> _findMpv() async {
+  if (Platform.isWindows) {
+    // Bundled by the installer (see .github/workflows/windows.yml) next to Frame.
+    final exe = '${File(Platform.resolvedExecutable).parent.path}\\mpv\\mpv.exe';
+    if (await File(exe).exists()) {
+      _mpvPath = exe;
+      _mpvVersion = await _cachedVersionOf(exe);
+      // The installer always brings a current mpv. If it couldn't say its version (it prints
+      // nothing in some setups), don't lose HDR, Dolby Vision and the newer options over that.
+      if (_mpvVersion == 0) _mpvVersion = 0.40;
+    }
+    debugPrint(_mpvPath == null
+        ? 'Player: no mpv next to Frame, using the in-app player'
+        : 'Player: videos play in mpv ${_mpvVersion.toStringAsFixed(2)} ($_mpvPath)');
+    return;
+  }
   if (!Platform.isLinux) return;
   // A finished download whose check didn't complete last time: check it again now.
   final leftover = File('$_ownMpv.part');
@@ -159,7 +189,20 @@ Future<void> _fetchMpv() async {
 /// the in-app player.
 /// With [sync], the video plays in a Watch together room: play, pause and seek go through the
 /// room, so everyone stays together.
-Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
+Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) {
+  if (!_mpvSearch.isCompleted) {
+    // Play pressed in the first moments after launch: wait for the player to be found.
+    return FutureBuilder<void>(
+      future: _mpvSearch.future,
+      builder: (context, snap) => snap.connectionState == ConnectionState.done
+          ? _playerScreen(jf, item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
+          : const ColoredBox(color: kBg),
+    );
+  }
+  return _playerScreen(jf, item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
+}
+
+Widget _playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
     _mpvPath != null
         ? NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
         : PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
@@ -178,7 +221,54 @@ class _Mpv {
   Stream<Map<String, dynamic>> get events => _events.stream;
   Future<int> get exitCode => _process?.exitCode ?? Future.value(-1);
 
-  Future<void> start(String mpv, List<String> args) async {
+  // Windows: no socket (see assets/mpv/frame_bridge.lua). Commands go into a small file the
+  // bridge script reads; replies and events come back on mpv's output.
+  RandomAccessFile? _commandFile;
+  String? _commandPath;
+
+  Future<void> _startBridge(String mpv, List<String> args, String bridgeScript) async {
+    final path = '${Directory.systemTemp.path}\\frame-mpv-$pid-${DateTime.now().millisecondsSinceEpoch}.txt';
+    _commandPath = path;
+    _commandFile = File(path).openSync(mode: FileMode.write);
+    final ready = Completer<void>();
+    _process = await Process.start(
+        mpv,
+        [
+          ...args,
+          '--script=$bridgeScript',
+          '--script-opts-append=frame_bridge-commands=$path',
+          '--msg-level=frame_bridge=info', // its messages must reach Frame even if mpv is told to be quiet
+        ],
+        environment: _mpvEnv);
+    var exited = false;
+    _process!.exitCode.then((_) {
+      exited = true;
+      _events.add({'event': 'closed'});
+      if (!ready.isCompleted) ready.completeError('mpv closed while starting.');
+    });
+    for (final stream in [_process!.stdout, _process!.stderr]) {
+      stream.transform(utf8.decoder).transform(const LineSplitter()).listen((line) {
+        final at = line.indexOf('[frame_bridge] ');
+        if (at >= 0) {
+          final json = line.substring(at + 15);
+          if (json.contains('"bridge-ready"')) {
+            if (!ready.isCompleted) ready.complete();
+            return;
+          }
+          _onLine(json);
+          return;
+        }
+        if (line.trim().isEmpty || _statusLine.hasMatch(line)) return;
+        debugPrint('mpv: $line');
+      });
+    }
+    await ready.future.timeout(const Duration(seconds: 15), onTimeout: () {
+      throw exited ? 'mpv closed while starting.' : 'mpv did not start.';
+    });
+  }
+
+  Future<void> start(String mpv, List<String> args, {String? bridgeScript}) async {
+    if (Platform.isWindows && bridgeScript != null) return _startBridge(mpv, args, bridgeScript);
     final socketPath = '${Directory.systemTemp.path}/frame-mpv-$pid-${DateTime.now().millisecondsSinceEpoch}.sock';
     _socketPath = socketPath;
     _process = await Process.start(mpv, [...args, '--input-ipc-server=$socketPath'], environment: _mpvEnv);
@@ -204,8 +294,16 @@ class _Mpv {
       }
     }
     if (_socket == null) throw exited ? 'mpv closed while starting.' : 'mpv did not start.';
-    _socket!.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()).listen(_onLine,
-        onError: (_) {}, onDone: () => _events.add({'event': 'closed'}));
+    final socket = _socket!;
+    // Once mpv is gone, writes to its socket fail later, outside any try ("Broken pipe"): catch
+    // that here, and stop writing to it at all.
+    socket.done.then((_) {}, onError: (_) {});
+    socket.cast<List<int>>().transform(utf8.decoder).transform(const LineSplitter()).listen(_onLine,
+        onError: (_) {}, onDone: () {
+      if (identical(_socket, socket)) _socket = null;
+      socket.destroy();
+      _events.add({'event': 'closed'});
+    });
   }
 
   void _onLine(String line) {
@@ -230,12 +328,18 @@ class _Mpv {
 
   Future<dynamic> command(List<dynamic> cmd) {
     final socket = _socket;
-    if (socket == null) return Future.error('mpv is not running');
+    final file = _commandFile;
+    if (socket == null && file == null) return Future.error('mpv is not running');
     final id = _next++;
     final c = Completer<dynamic>();
     _pending[id] = c;
     try {
-      socket.write('${jsonEncode({'command': cmd, 'request_id': id})}\n');
+      final line = '${jsonEncode({'command': cmd, 'request_id': id})}\n';
+      if (socket != null) {
+        socket.write(line);
+      } else {
+        file!.writeStringSync(line);
+      }
     } catch (e) {
       _pending.remove(id);
       return Future.error(e);
@@ -285,18 +389,26 @@ class _Mpv {
     } catch (_) {}
     final path = _socketPath;
     if (path != null) File(path).delete().then((_) {}, onError: (_) {});
+    try {
+      _commandFile?.closeSync();
+    } catch (_) {}
+    _commandFile = null;
+    final cmd = _commandPath;
+    if (cmd != null) File(cmd).delete().then((_) {}, onError: (_) {});
   }
 }
 
 // ---------- The screen ----------
 
 class NativePlayerScreen extends StatefulWidget {
-  const NativePlayerScreen({super.key, required this.jf, required this.item, this.sync, this.playlistItemId, this.startTicks});
+  const NativePlayerScreen(
+      {super.key, required this.jf, required this.item, this.sync, this.playlistItemId, this.startTicks, this.continued = false});
   final Jellyfin jf;
   final dynamic item;
   final SyncPlay? sync; // a Watch together room, or null
   final String? playlistItemId; // the room's id for this video
   final int? startTicks; // where the room starts (instead of your resume point)
+  final bool continued; // opened by the previous episode (Frame's window is already hidden)
 
   @override
   State<NativePlayerScreen> createState() => _NativePlayerScreenState();
@@ -318,6 +430,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // steps aside until you come back, so there's only ever one Frame window.
   bool _handedOff = false;
   bool _mpvFull = false;
+  bool _fileEnding = false; // between a video's end and the next one loading
   bool _paused = false;
   bool _ended = false;
   String? _error;
@@ -362,6 +475,16 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   int get _serverStep => 2;
   int get _maxLevel => _mode == 'original' ? 1 : 2;
 
+  /// A disc image or a disc folder (ISO, Blu-ray BDMV, DVD VIDEO_TS): the original can't be
+  /// streamed as one file, so the server's version is used for it.
+  bool get _isDisc {
+    final type = (_item['VideoType'] ?? 'VideoFile').toString();
+    final container = (_item['Container'] ?? '').toString().toLowerCase();
+    return type != 'VideoFile' || container == 'iso' || container == 'bluray' || container == 'dvd';
+  }
+
+  bool _triedServer = false; // the original failed to open, and the server's version was tried
+
   List<dynamic> _streams(String type) =>
       ((_item['MediaStreams'] as List?) ?? []).where((s) => s['Type'] == type).toList();
 
@@ -375,17 +498,18 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   void initState() {
     super.initState();
     // While mpv is open, full screen (touchpad / Create / F11) applies to the mpv window.
-    fullScreenOverride = () => _mpv.command(['cycle', 'fullscreen']).then((_) {}, onError: (_) {});
+    fullScreenOverride = _cycleFullScreen;
     padActive.addListener(_sendPad);
     padStyle.addListener(_sendPad);
     GamepadInput.keyOverride = _forward;
+    widget.sync?.playerOpened(widget.playlistItemId); // watching the party's video
     _start();
   }
 
   @override
   void dispose() {
     _takeBack();
-    fullScreenOverride = null;
+    if (fullScreenOverride == _cycleFullScreen) fullScreenOverride = null;
     if (GamepadInput.keyOverride == _forward) GamepadInput.keyOverride = null;
     padActive.removeListener(_sendPad);
     padStyle.removeListener(_sendPad);
@@ -399,17 +523,190 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     }
     _saveLearnedLevel();
     _endTogether();
+    widget.sync?.playerClosed(); // still in the party, just not watching
     super.dispose();
+  }
+
+  Future<void> _cycleFullScreen() => _mpv.command(['cycle', 'fullscreen']).then((_) {}, onError: (_) {});
+
+  // ---------- The loading screen, on both sides of the switch ----------
+  //
+  // Frame's screen (build, below) and the player's (frame_ui.lua) are drawn the same: the
+  // title logo centred in a box 900 x 160 at y = 500 of the 1080-high design, the episode line
+  // at y = 620, a thin line at y = 680. The player can't draw pictures in its controls, so
+  // Frame hands it the logo as an overlay at exactly that place, and removes it when the video
+  // starts.
+
+  bool _logoShown = false;
+  bool _logoFailed = false; // no logo after all: the player writes the title instead
+  bool _videoStarted = false; // the player said the loading screen is over ('loaded')
+
+  /// The line under the title on both loading screens.
+  String get _loadingLine =>
+      _item['Type'] == 'Episode' ? episodeLine(_item) : (_item['ProductionYear']?.toString() ?? '');
+
+  Future<void> _showLogoInPlayer() async {
+    final url = widget.jf.logoFor(_item);
+    if (url == null) return;
+    try {
+      // The player window's size, once it's up.
+      Map? osd;
+      for (var i = 0; i < 40 && !_ended; i++) {
+        final d = await _mpv.get('osd-dimensions');
+        if (d is Map && (d['w'] ?? 0) > 0 && (d['h'] ?? 0) > 0) {
+          osd = d;
+          break;
+        }
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      if (osd == null || _ended) return;
+      final ow = (osd['w'] as num).toDouble(), oh = (osd['h'] as num).toDouble();
+      final scale = oh / 1080;
+      final res = await Jellyfin.client.get(Uri.parse(url)).timeout(const Duration(seconds: 5));
+      if (res.statusCode != 200) return;
+      final codec = await ui.instantiateImageCodec(res.bodyBytes, targetHeight: (160 * scale).round());
+      var image = (await codec.getNextFrame()).image;
+      if (await logoNeedsMatte(url, image)) return; // a logo on a black box: the title as text instead
+      // Fit the 900 x 160 box like Frame does (BoxFit.contain).
+      if (image.width > 900 * scale) {
+        final c2 = await ui.instantiateImageCodec(res.bodyBytes, targetWidth: (900 * scale).round());
+        image = (await c2.getNextFrame()).image;
+      }
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba); // premultiplied
+      if (data == null || _ended || _videoStarted) return; // too late: the video is already on
+      final px = data.buffer.asUint8List();
+      for (var i = 0; i < px.length; i += 4) {
+        final r = px[i];
+        px[i] = px[i + 2]; // mpv wants blue-green-red-alpha
+        px[i + 2] = r;
+      }
+      final file = File('${Directory.systemTemp.path}${Platform.pathSeparator}frame-logo-$pid.bgra');
+      await file.writeAsBytes(px, flush: true);
+      final x = ((ow - image.width) / 2).round();
+      final y = (500 * scale - image.height / 2).round();
+      if (_ended || _videoStarted) return;
+      // Marked shown before the command goes out, so a 'loaded' arriving meanwhile still
+      // removes it (the removal is sent after the add, and mpv runs them in order).
+      _logoShown = true;
+      await _mpv.command(['overlay-add', 0, x, y, file.path, 0, 'bgra', image.width, image.height, image.width * 4]);
+      if (_videoStarted) _removeLogoFromPlayer();
+    } catch (e) {
+      debugPrint('Player: logo for the loading screen unavailable ($e)');
+    } finally {
+      if (!_logoShown) _logoFailed = true;
+      if (!_ended && !_videoStarted) await _sendInfo(); // logo up, or the title as text instead
+    }
+  }
+
+  void _removeLogoFromPlayer() {
+    if (!_logoShown) return;
+    _logoShown = false;
+    _logoFailed = true; // the logo was for the first video only
+    _mpv.command(['overlay-remove', 0]).then((_) {}, onError: (_) {});
+  }
+
+  // ---------- Up next ----------
+  //
+  // For episodes: near the end a card offers the next one (from where the credits start when
+  // the server knows, otherwise 30 s before the end). Cross plays it now, Circle hides the
+  // card. When the episode ends (or you skip past the end), the next one starts by itself, in
+  // the same full screen, without going back to Frame. In a Watch together room, the room
+  // moves on together.
+
+  dynamic _next; // the next episode, or null (movies, last episode)
+  double? _creditsAt; // seconds
+  bool _nextDismissed = false;
+  bool _continuing = false; // handing the screen over to the next episode
+
+  Future<void> _findNext() async {
+    if (_item['Type'] != 'Episode') return;
+    try {
+      final results = await Future.wait([
+        widget.jf.episodeAfter(_item),
+        widget.jf.creditsStart(_id),
+      ]).timeout(const Duration(seconds: 4));
+      _next = results[0];
+      _creditsAt = results[1] as double?;
+      if (_next != null) debugPrint('Player: up next is ${episodeLine(_next)}');
+      if (!_ended) await _sendInfo();
+    } catch (e) {
+      debugPrint('Player: next episode unknown ($e)');
+    }
+  }
+
+  // The file reached its end (mpv holds the last picture): next episode, or close.
+  void _onEnded() {
+    if (_ended || _continuing) return;
+    final sync = _sync;
+    if (_next != null && !_nextDismissed) {
+      // In a room only the one who opened it moves everyone on (so it happens once).
+      if (sync == null || sync.isHost) {
+        _playNext();
+        return;
+      }
+      _notice('Waiting for the next episode…');
+      return;
+    }
+    _mpv.command(['quit']).then((_) {}, onError: (_) {});
+  }
+
+  Future<void> _playNext() async {
+    final next = _next;
+    if (next == null || _continuing || _ended) return;
+    final sync = _sync;
+    if (sync != null) {
+      // The room's new video reaches everyone (this player too) and each one switches.
+      try {
+        await sync.play(next['Id'].toString(), 0);
+      } catch (e) {
+        _notice("Couldn't start the next episode");
+      }
+      return;
+    }
+    _continuing = true;
+    _ended = true;
+    widget.jf.reportStopped(_id, _ticksNow, session: _session);
+    final series = _item['SeriesId'];
+    if (series != null) widget.jf.forgetShow(series.toString());
+    // The next player opens the way this one is (full screen or not); Frame stays hidden.
+    fullScreen.value = _mpvFull;
+    await _mpv.close();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => NativePlayerScreen(jf: widget.jf, item: next, continued: true)));
   }
 
   // ---------- Starting ----------
 
-  Future<String> _scriptPath() async {
-    final dir = Directory('${(await getApplicationSupportDirectory()).path}/mpv');
+  Future<String> _scriptPath([String name = 'frame_ui.lua']) async {
+    final dir = Directory('${(await getApplicationSupportDirectory()).path}${Platform.pathSeparator}mpv');
     await dir.create(recursive: true);
-    final file = File('${dir.path}/frame_ui.lua');
-    await file.writeAsString(await rootBundle.loadString('assets/mpv/frame_ui.lua'));
+    final file = File('${dir.path}${Platform.pathSeparator}$name');
+    await file.writeAsString(await rootBundle.loadString('assets/mpv/$name'));
     return file.path;
+  }
+
+  // Windows: Frame's two fonts in a folder mpv is pointed at (--osd-fonts-dir), since there's
+  // no per-user font folder it reads by itself.
+  Future<String?> _fontsDir() async {
+    if (!Platform.isWindows) return null;
+    try {
+      final dir = Directory('${(await getApplicationSupportDirectory()).path}\\fonts');
+      await dir.create(recursive: true);
+      for (final name in [
+        'HankenGrotesk-400.ttf', 'HankenGrotesk-500.ttf', 'HankenGrotesk-600.ttf',
+        'HankenGrotesk-700.ttf', 'HankenGrotesk-800.ttf', 'Sora-600.ttf', 'Sora-700.ttf',
+      ]) {
+        final f = File('${dir.path}\\$name');
+        if (await f.exists()) continue;
+        final data = await rootBundle.load('assets/fonts/$name');
+        await f.writeAsBytes(data.buffer.asUint8List(), flush: true);
+      }
+      return dir.path;
+    } catch (e) {
+      debugPrint('Player: fonts for mpv could not be prepared: $e');
+      return null;
+    }
   }
 
   // mpv draws the controls with the system's fonts: make Frame's two fonts available to it.
@@ -447,11 +744,18 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     // current resume point and tracks, without making you wait more than a moment.
     try {
       _fresh = await widget.jf.item(_id, fresh: true).timeout(const Duration(seconds: 3));
-    } catch (_) {}
+    } catch (e) {
+      // The server is plainly off (not just slow): say so now, instead of opening the player
+      // on a file it can't get.
+      if (e.toString() == Jellyfin.unreachable && !await _serverAnswers()) {
+        _showUnreachable();
+        return;
+      }
+    }
     await _loadTrackPrefs();
 
     String url = widget.jf.directStreamUrl(_id);
-    final wantServer = _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
+    final wantServer = _isDisc || _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
     if (wantServer) {
       _presetServerTracks();
       final server = await _serverStream();
@@ -459,18 +763,24 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     }
 
     await _installFonts();
+    final fonts = await _fontsDir();
     final script = await _scriptPath();
+    final bridge = Platform.isWindows ? await _scriptPath('frame_bridge.lua') : null;
     final window = await _windowArgs();
     final resume = _resumeTicks > 0 ? _resumeTicks / 10000000 : 0.0;
     final args = <String>[
       ...window,
       '--title=Frame',
       // Shown as Frame (not as a separate mpv app) by KDE.
-      if (_mpvHasHdr) '--wayland-app-id=frame',
+      if (_mpvHasHdr && Platform.isLinux) '--wayland-app-id=frame',
+      if (fonts != null) '--osd-fonts-dir=$fonts',
       if (_mpvHasHdr) '--background-color=#06080B',
       '--force-window=immediate',
-      '--keep-open=no',
-      '--idle=no',
+      // At the end, mpv holds the last picture and Frame decides: next episode, or close.
+      '--keep-open=yes',
+      // A file that fails to open leaves mpv waiting instead of closing, so Frame can try the
+      // server's version of it (see _onLoadFailed). Leaving still closes it as usual.
+      '--idle=yes',
       '--osc=no',
       '--osd-bar=no',
       '--ytdl=no',
@@ -486,6 +796,13 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       // Newer mpv: tell KDE the picture is HDR so the screen shows it as HDR (KDE turns this
       // into SDR itself when HDR is off). Older mpv converts to SDR with the setting above.
       if (_mpvHasHdr) '--target-colorspace-hint=yes',
+      // 25 or 23.976 fps on a 60 Hz screen can't be shown evenly (frames would alternate between
+      // 2 and 3 refreshes: judder in slow pans). Timing playback to the screen and blending the
+      // odd frame keeps motion even; it costs very little. Turned off again on a device that
+      // struggles (see "Adapting to this device").
+      '--video-sync=display-resample',
+      '--interpolation=yes',
+      '--tscale=oversample',
       '--cache=yes',
       '--demuxer-max-bytes=256MiB',
       '--demuxer-max-back-bytes=128MiB',
@@ -497,7 +814,12 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       '--stream-lavf-o-append=reconnect=1',
       '--stream-lavf-o-append=reconnect_on_network_error=1',
       '--stream-lavf-o-append=reconnect_delay_max=4',
-      '--hr-seek=no',
+      // Resume points (and switching to the server's version) land exactly; skips stay quick, on
+      // the nearest keyframe.
+      '--hr-seek=absolute',
+      // TV recordings and DVDs are often interlaced (combing on movement): mpv 0.38+ smooths
+      // only the frames marked interlaced and leaves everything else untouched.
+      if (_mpvVersion >= 0.38) '--deinterlace=auto',
       '--sub-ass-override=scale',
       '--script=$script',
       if (resume > 0) '--start=${resume.toStringAsFixed(1)}',
@@ -505,7 +827,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     ];
     if (!mounted) return; // closed while getting ready
     try {
-      await _mpv.start(_mpvPath!, args);
+      await _mpv.start(_mpvPath!, args, bridgeScript: bridge);
     } catch (e) {
       if (mounted) setState(() => _error = "mpv couldn't start: ${errorText(e)}");
       return;
@@ -519,12 +841,15 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     _mpv.observe(1, 'time-pos');
     _mpv.observe(3, 'pause');
     _mpv.observe(5, 'fullscreen');
+    _mpv.observe(7, 'duration');
+    _mpv.observe(8, 'eof-reached');
     if (widget.sync != null) {
       _mpv.observe(6, 'paused-for-cache');
-      _mpv.observe(7, 'duration');
       _startTogether();
     }
+    unawaited(_findNext());
     unawaited(_handOff());
+    unawaited(_showLogoInPlayer());
     _mpv.observe(4, 'user-data/frame/request');
     await _applyLevel();
     await _applySubStyle();
@@ -537,7 +862,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         final text = _serverTextSub;
         if (text != null) _showServerTextSub(text);
       } else {
-        _applyTrackPrefs();
+        _addExternalSubs().whenComplete(_applyTrackPrefs);
       }
       _link?.ready(); // the room is waiting for this player
     });
@@ -586,9 +911,20 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   }
 
   // Once mpv's window is up, Frame's own window steps aside.
+  // In full screen, Frame simply stays where it is, under the player, showing the same loading
+  // screen the player opens on: no minimize and restore animations, so starting and leaving a
+  // video feels like part of the app. In a window (where the player can't be placed exactly
+  // over Frame) Frame steps aside as before.
+  bool _underneath = false;
+
   Future<void> _handOff() async {
     await Future.delayed(const Duration(milliseconds: 500));
     if (_ended || !mounted) return;
+    PerfRecorder.hidden = true; // covered either way
+    if (fullScreen.value) {
+      _underneath = true;
+      return;
+    }
     try {
       await windowManager.hide();
       _handedOff = true;
@@ -598,8 +934,18 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // When the video ends or you go back, Frame comes back the way you left the player: if you
   // switched the player to full screen, Frame is full screen too, and the other way round.
   Future<void> _takeBack() async {
-    if (!_handedOff) return;
+    if (_underneath && !_continuing) {
+      _underneath = false;
+      PerfRecorder.hidden = false;
+      try {
+        await windowManager.focus();
+        if (_mpvFull != fullScreen.value) await setFullScreen(_mpvFull);
+      } catch (_) {}
+      return;
+    }
+    if (!_handedOff || _continuing) return;
     _handedOff = false;
+    PerfRecorder.hidden = false;
     try {
       await windowManager.show();
       await windowManager.focus();
@@ -625,17 +971,34 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         case 'pause':
           if (data is bool) _paused = data;
         case 'fullscreen':
-          if (data is bool) _mpvFull = data;
+          // (ignored while a video is ending: the player leaves full screen as its window
+          // closes, which isn't a choice to carry back to Frame)
+          if (data is bool && !_fileEnding) _mpvFull = data;
         case 'paused-for-cache':
           if (data is bool) _onStall(data);
         case 'duration':
           if (data is num) _duration = data.toDouble();
+        case 'eof-reached':
+          if (data == true) _onEnded();
         case 'user-data/frame/request':
           if (data is Map) _onRequest(data);
       }
+    } else if (e['event'] == 'end-file' || e['event'] == 'shutdown') {
+      _fileEnding = true;
+      if (e['event'] == 'end-file' && e['reason'] == 'error') _onLoadFailed(e['file_error']?.toString());
     } else if (e['event'] == 'seek') {
       _lastSeek = DateTime.now();
+    } else if (e['event'] == 'playback-restart') {
+      // The video is on screen. Normally the player asks for the logo to go ('loaded'); this
+      // is the backup, after its fade, so the logo can never stay over the video.
+      if (!_videoStarted) {
+        Timer(const Duration(milliseconds: 700), () {
+          _videoStarted = true;
+          _removeLogoFromPlayer();
+        });
+      }
     } else if (e['event'] == 'file-loaded') {
+      _fileEnding = false;
       _loadedSeen = true;
       Timer(const Duration(seconds: 2), () {
         if (!_ended) _logPlayback('opened');
@@ -645,10 +1008,98 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         final text = _serverTextSub;
         if (text != null) _showServerTextSub(text);
       } else {
-        _applyTrackPrefs();
+        _addExternalSubs().whenComplete(_applyTrackPrefs);
       }
       _link?.ready();
     }
+  }
+
+  // Subtitles kept as separate files next to the video (movie.fr.srt, .ass, .vtt, .sup): the
+  // original file doesn't contain them, so they're added to the player from the server.
+  bool _externalSubsAdded = false;
+
+  Future<void> _addExternalSubs() async {
+    if (_externalSubsAdded || _server) return;
+    _externalSubsAdded = true;
+    const ext = {'subrip': 'srt', 'srt': 'srt', 'ass': 'ass', 'ssa': 'ssa', 'webvtt': 'vtt', 'vtt': 'vtt', 'pgssub': 'sup', 'sup': 'sup'};
+    for (final s in _streams('Subtitle').where((s) => s['IsExternal'] == true)) {
+      final format = ext[(s['Codec'] ?? '').toString().toLowerCase()];
+      final index = s['Index'];
+      if (format == null || index is! int) continue; // (an .idx/.sub pair needs both files: not supported)
+      final url = widget.jf.externalSubtitleUrl(_id, index, format);
+      final title = (s['Title'] ?? s['DisplayTitle'] ?? '').toString();
+      final lang = (s['Language'] ?? '').toString();
+      try {
+        await _mpv.command(['sub-add', url, 'auto', title, lang]);
+      } catch (e) {
+        debugPrint('Player: subtitle file ${s['DisplayTitle']} could not be added: $e');
+      }
+    }
+  }
+
+  // The original file wouldn't open (a format the player can't read from a stream, a disc
+  // image, a damaged file): try the server's version once, from the same moment. If that
+  // fails too, say so plainly.
+  Future<void> _onLoadFailed(String? why) async {
+    if (_ended) return;
+    if (_videoStarted) {
+      // It played, then broke off (the connection dropped for good): close as before, rather
+      // than leave the player waiting on a black screen.
+      perfLog('mpv stopped with an error during playback (${why ?? 'unknown error'})');
+      unawaited(_mpv.close());
+      return;
+    }
+    // The server itself is gone (NAS off, network down): no point asking it for its version.
+    if (!await _serverAnswers()) {
+      perfLog('mpv could not open the video: the server is not answering');
+      _ended = true;
+      _showUnreachable();
+      unawaited(_mpv.close());
+      return;
+    }
+    if (!_server && !_triedServer) {
+      _triedServer = true;
+      perfLog('mpv could not open the original (${why ?? 'unknown error'}): trying the server version');
+      _presetServerTracks();
+      await _reopen(server: true, at: _pos > 0 ? _pos : (_resumeTicks > 0 ? _resumeTicks / 10000000 : 0));
+      if (_server) return;
+    }
+    perfLog('mpv could not open ${_server ? 'the server version' : 'the original'} (${why ?? 'unknown error'})');
+    _ended = true;
+    if (mounted) {
+      setState(() => _error = "This video couldn't be played${why != null ? ' ($why)' : ''}. "
+          "The server couldn't provide a playable version either.");
+    }
+    unawaited(_mpv.close());
+  }
+
+  /// A quick "are you there?" to the server (its public info), 3 seconds at most.
+  Future<bool> _serverAnswers() async {
+    try {
+      await widget.jf.publicInfo().timeout(const Duration(seconds: 3));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _unreachable = false; // the error is "server off": offer Retry
+
+  void _showUnreachable() {
+    _ended = true;
+    if (!mounted) return;
+    setState(() {
+      _unreachable = true;
+      _error = Jellyfin.unreachable;
+    });
+  }
+
+  // Retry after the server was off: the same video, opened afresh.
+  void _retry() {
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => NativePlayerScreen(
+          jf: widget.jf, item: widget.item, sync: widget.sync, playlistItemId: widget.playlistItemId, startTicks: widget.startTicks),
+    ));
   }
 
   // ---------- What the controls inside mpv ask Frame to do ----------
@@ -679,6 +1130,15 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         await _rememberMpvTrack(value.toString());
       case 'sync':
         if (value is Map) await _togetherRequest(value);
+      case 'next':
+        await _playNext();
+        return;
+      case 'loaded':
+        _videoStarted = true;
+        _removeLogoFromPlayer(); // the loading screen fades into the video
+        return;
+      case 'next_dismiss':
+        _nextDismissed = true;
       case 'style':
         if (value is Map) {
           _subScale = ((value['scale'] ?? _subScale) as num).toDouble();
@@ -705,6 +1165,9 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     final defaultAudio = audio.cast<dynamic>().firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index'];
     await _mpv.set('user-data/frame/info', {
       'title': titleOf(_item),
+      'logo': _logoShown,
+      'logo_coming': !_logoFailed && widget.jf.logoFor(_item) != null,
+      'loading_line': _loadingLine,
       'subtitle': subtitleLine,
       'quality': qualityLine(_item),
       'mode': _mode,
@@ -727,6 +1190,12 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
           }
       ],
       if (_room != null) 'group': _room,
+      // Up next: what, and from when (the credits, or 30 s before the end).
+      if (_next != null && !_nextDismissed)
+        'next': {
+          'title': episodeLine(_next),
+          if (_creditsAt != null) 'at': _creditsAt, // otherwise the controls use 30 s before the end
+        },
       // Your profile colour for the panels' line (mpv writes colours blue-green-red).
       'accent': [kAccent.blue, kAccent.green, kAccent.red].map((c) => c.toRadixString(16).padLeft(2, '0')).join().toUpperCase(),
       'sub_scale': _subScale,
@@ -737,9 +1206,11 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
 
   // ---------- The controller, the legend ----------
 
+  // Kept in a property (not a one-off message), so the controls pick it up even when they
+  // load after Frame has sent it: the legend no longer goes missing on some videos.
   void _sendPad() {
     final style = !padActive.value ? 'none' : (padStyle.value == PadStyle.playstation ? 'ps' : 'xbox');
-    _mpv.command(['script-message-to', 'frame_ui', 'pad', style]).then((_) {}, onError: (_) {});
+    _mpv.set('user-data/frame/pad', style);
   }
 
   // Frame still reads the controller while mpv is in front, and passes the buttons on.
@@ -954,6 +1425,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       if (!mounted) return;
       _ended = true; // this screen hands over; the room continues
       _handingOver = true;
+      _continuing = true; // straight into the next video, without showing Frame in between
+      fullScreen.value = _mpvFull;
       widget.jf.reportStopped(_id, _ticksNow, session: _session);
       _endTogether(); // hands over: the room stays
       await _mpv.close();
@@ -991,10 +1464,10 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   }
 
   // Opens the original file or the server's version at the current moment.
-  Future<void> _reopen({required bool server}) async {
+  Future<void> _reopen({required bool server, double? at}) async {
     if (_switching) return;
     _switching = true;
-    final at = _pos;
+    at ??= _pos;
     final oldSession = _session;
     try {
       String? url;
@@ -1007,6 +1480,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         _session = null;
       }
       await _mpv.set('start', at.toStringAsFixed(1));
+      _externalSubsAdded = false; // the new stream needs them again (original only)
       await _mpv.command(['loadfile', url, 'replace']);
       widget.jf.reportStopped(_id, (at * 10000000).round(), session: oldSession);
       widget.jf.reportStart(_id, (at * 10000000).round(), session: _session);
@@ -1088,6 +1562,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       'linear-downscaling': false,
       'sigmoid-upscaling': false,
       'deband': false,
+      'interpolation': false,
     }.entries) {
       await _mpv.set(p.key, p.value);
     }
@@ -1182,22 +1657,102 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         autofocus: true,
         onKeyEvent: _onKey,
         child: Scaffold(
-          backgroundColor: Colors.black,
-          body: Center(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text(_error ?? 'Playing ${titleOf(_item)}', style: tvBody(26, color: kMuted)),
-              if (_error != null) ...[
-                const SizedBox(height: 24),
-                Focusable(
-                  autofocus: true,
-                  onSelect: () => Navigator.of(context).maybePop(),
-                  builder: (f) => tvPill('Back', focused: f, icon: Icons.arrow_back_rounded),
-                ),
-              ],
-            ]),
-          ),
+          backgroundColor: kBg,
+          body: TvCanvas(child: _error != null ? _errorView() : _loadingView()),
         ),
       ),
     );
   }
+
+  // Play pressed: the page's artwork dims away and the title settles in the centre, the same
+  // screen the player opens on (frame_ui.lua draws it at the same place), so the switch to the
+  // player's window can't be seen.
+  Widget _loadingView() {
+    final logo = widget.jf.logoFor(_item);
+    final title = Text(titleOf(_item), textAlign: TextAlign.center, style: tvDisplay(64), maxLines: 2);
+    final line = _loadingLine;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 650),
+      curve: Curves.easeOutCubic,
+      builder: (context, t, _) => Stack(children: [
+        Positioned.fill(
+          child: Opacity(
+            opacity: (1 - t) * 0.6,
+            child: Transform.scale(
+              scale: 1 + 0.05 * t,
+              child: netImage(
+                widget.jf.backdropFor(_item, maxWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560)),
+                cacheWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560),
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: 420,
+          height: 160,
+          child: Center(
+            child: SizedBox(
+              width: 900,
+              height: 160,
+              child: logo == null
+                  ? Center(child: title)
+                  : LogoImage(url: logo, height: 160, cacheHeight: tvPx(160), alignment: Alignment.center, fallback: Center(child: title)),
+            ),
+          ),
+        ),
+        if (line.isNotEmpty)
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 606,
+            child: Text(line, textAlign: TextAlign.center, style: tvBody(26, color: kSoft)),
+          ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: 678,
+          child: Center(
+            child: SizedBox(
+              width: 240,
+              height: 4,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(backgroundColor: kFg.withOpacity(0.12), color: kAccent),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _errorView() => Center(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1100),
+            child: Text(_error!, textAlign: TextAlign.center, style: tvBody(26, color: kMuted)),
+          ),
+          const SizedBox(height: 24),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            if (_unreachable) ...[
+              Focusable(
+                autofocus: true,
+                onSelect: _retry,
+                builder: (f) => tvPill('Retry', focused: f, icon: Icons.refresh_rounded),
+              ),
+              const SizedBox(width: 16),
+            ],
+            Focusable(
+              autofocus: !_unreachable,
+              onSelect: () => Navigator.of(context).maybePop(),
+              builder: (f) => tvPill('Back', focused: f, icon: Icons.arrow_back_rounded),
+            ),
+          ]),
+        ]),
+      );
 }

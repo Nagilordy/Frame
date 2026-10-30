@@ -65,6 +65,53 @@ class SyncPlay {
   /// When this PC asked for play/pause/seek last (to tell your own actions from others').
   DateTime lastOwnRequest = DateTime(0);
 
+  // ---------- The party (a room that outlives each video) ----------
+  //
+  // You stay in the room until you choose Leave party. Closing a video only takes you out of
+  // that video: Jellyfin is told not to wait for you ("ignore wait") until you watch again.
+  // When anyone in the party starts something, it opens here by itself if you're not already
+  // watching.
+
+  /// Frame's navigator, so a video someone starts can open from any screen (set in main).
+  static GlobalKey<NavigatorState>? navigator;
+
+  int _playersOpen = 0; // room players open right now on this PC
+  bool _opening = false; // this PC is opening the room's video itself
+  String? _followed; // the room's video (playlist item) this PC already opened
+
+  bool get inParty => group.value != null;
+
+  void playerOpened(String? playlistItemId) {
+    _playersOpen++;
+    if (playlistItemId != null) _followed = playlistItemId;
+    setIgnoreWait(false);
+  }
+
+  void playerClosed() {
+    _playersOpen--;
+    if (_playersOpen <= 0) {
+      _playersOpen = 0;
+      if (inParty) setIgnoreWait(true);
+    }
+  }
+
+  Future<void> setIgnoreWait(bool ignore) => jf
+      .postPath('/SyncPlay/SetIgnoreWait', {'IgnoreWait': ignore})
+      .then((_) {}, onError: (e) => log('ignore-wait failed: $e'));
+
+  // Someone started a video in the party and this PC isn't watching: open it.
+  void _maybeFollow() {
+    final now = nowPlaying;
+    final nav = navigator?.currentState;
+    if (!inParty || now == null || nav == null || _playersOpen > 0 || _opening) return;
+    if (now.playlistItemId == _followed) return; // already opened (or closed on purpose)
+    _followed = now.playlistItemId;
+    isHost = false;
+    log('the party started ${now.itemId}: opening it');
+    _opening = true;
+    _pushRoomPlayer(nav, jf, this).whenComplete(() => _opening = false);
+  }
+
   // ---------- Frame's own instant channel ----------
   //
   // Frames in a room send each other short messages through Jellyfin's live connection
@@ -283,6 +330,8 @@ class SyncPlay {
         if (g != null && data is Map) group.value = g.copyWith(state: (data['State'] ?? g.state).toString());
       case 'PlayQueue':
         if (data is Map) queue = data.cast<String, dynamic>();
+        // Let the players see it first (they switch videos themselves), then follow if needed.
+        scheduleMicrotask(_maybeFollow);
       case 'GroupLeft':
       case 'NotInGroup':
       case 'GroupDoesNotExist':
@@ -326,8 +375,10 @@ class SyncPlay {
 
   Future<void> leave() async {
     if (group.value == null) return;
+    if (direct) await sendDirect({'t': 'bye', 'by': jf.userName ?? 'Someone'});
     group.value = null;
     queue = null;
+    _followed = null;
     try {
       await jf.postPath('/SyncPlay/Leave');
     } catch (_) {}
@@ -431,14 +482,66 @@ void _toast(BuildContext context, String text, {bool problem = false}) => showBa
       duration: Duration(seconds: problem ? 7 : 3),
     );
 
-/// Watch together from a title: opens a room named after it, starts it at your resume point,
-/// and plays it. Others see the room on their Home (Frame) or in Jellyfin's SyncPlay menu.
+/// Starts a watch party with nothing playing yet: whatever anyone in it plays next plays for
+/// everyone. Others see it on their Home (an invite, and the pill at the top right).
+Future<void> startParty(BuildContext context, Jellyfin jf) async {
+  final sync = SyncPlay.of(jf);
+  if (sync.inParty) {
+    _toast(context, "You're already in a party.");
+    return;
+  }
+  _toast(context, 'Starting a watch party…');
+  try {
+    final direct = await sync.canDirect();
+    await sync.create('${jf.userName ?? 'Frame'} · Watch party${direct ? SyncPlay.directTag : ''}');
+    sync.direct = direct;
+    sync.isHost = true;
+    await sync.setIgnoreWait(true); // nobody is watching yet
+    if (context.mounted) _toast(context, 'Party started. Anything you play now plays for everyone.');
+  } catch (e) {
+    await sync.leave();
+    if (context.mounted) _toast(context, _friendly(e), problem: true);
+  }
+}
+
+/// Leaves the party (the others carry on without you).
+Future<void> leaveParty(BuildContext context, Jellyfin jf) async {
+  await SyncPlay.of(jf).leave();
+  if (context.mounted) _toast(context, 'You left the party.');
+}
+
+/// Play from any title: for the party when you're in one, otherwise just for you.
+/// [startTicks]: where to start (0 = from the beginning); by default, where you left off.
+Future<void> playOrParty(BuildContext context, Jellyfin jf, dynamic item, {int? startTicks}) async {
+  final sync = SyncPlay.of(jf);
+  if (sync.inParty) return _playForParty(context, jf, item, startTicks: startTicks);
+  await Navigator.of(context).push(MaterialPageRoute(builder: (_) => playerScreen(jf, item, startTicks: startTicks)));
+}
+
+Future<void> _playForParty(BuildContext context, Jellyfin jf, dynamic item, {int? startTicks}) async {
+  final sync = SyncPlay.of(jf);
+  sync._opening = true;
+  try {
+    sync.isHost = true; // whoever picks the video keeps time for it
+    final resume = startTicks ?? (item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
+    await sync.play(item['Id'].toString(), resume);
+    if (!context.mounted) return;
+    await _openRoomPlayer(context, jf, sync);
+  } catch (e) {
+    if (context.mounted) _toast(context, _friendly(e), problem: true);
+  } finally {
+    sync._opening = false;
+  }
+}
+
+/// Watch together from a title: plays it for your party, or opens a party with it.
 Future<void> startWatchTogether(BuildContext context, Jellyfin jf, dynamic item) async {
   if (item == null) return;
   final sync = SyncPlay.of(jf);
+  if (sync.inParty) return _playForParty(context, jf, item);
   _toast(context, 'Opening a room…');
+  sync._opening = true;
   try {
-    await sync.leave();
     final title = item['Type'] == 'Episode'
         ? '${item['SeriesName'] ?? ''} S${item['ParentIndexNumber'] ?? '?'} E${item['IndexNumber'] ?? '?'}'
         : (item['Name'] ?? 'a movie').toString();
@@ -455,12 +558,15 @@ Future<void> startWatchTogether(BuildContext context, Jellyfin jf, dynamic item)
   } catch (e) {
     await sync.leave();
     if (context.mounted) _toast(context, _friendly(e), problem: true);
+  } finally {
+    sync._opening = false;
   }
 }
 
 Future<void> joinWatchTogether(BuildContext context, Jellyfin jf, String groupId) async {
   final sync = SyncPlay.of(jf);
   _toast(context, 'Joining…');
+  sync._opening = true;
   try {
     if (sync.group.value?.id != groupId) {
       await sync.leave();
@@ -473,21 +579,35 @@ Future<void> joinWatchTogether(BuildContext context, Jellyfin jf, String groupId
       throw "This room uses Frame's instant sync. Ask the server's admin to allow "
           '"remote control of other users" for your profile (Dashboard › Users).';
     }
-    await sync.awaitQueue(timeout: const Duration(seconds: 15));
+    // Nothing playing yet (a party waiting for someone to pick): stay here, it opens by
+    // itself when someone starts something.
+    try {
+      await sync.awaitQueue(timeout: const Duration(seconds: 3));
+    } catch (_) {}
+    if (sync.nowPlaying == null) {
+      await sync.setIgnoreWait(true);
+      if (context.mounted) _toast(context, "You're in the party. When someone plays something, it opens here.");
+      return;
+    }
     if (!context.mounted) return;
     await _openRoomPlayer(context, jf, sync);
   } catch (e) {
     await sync.leave();
     if (context.mounted) _toast(context, _friendly(e), problem: true);
+  } finally {
+    sync._opening = false;
   }
 }
 
-Future<void> _openRoomPlayer(BuildContext context, Jellyfin jf, SyncPlay sync) async {
+Future<void> _openRoomPlayer(BuildContext context, Jellyfin jf, SyncPlay sync) =>
+    _pushRoomPlayer(Navigator.of(context), jf, sync);
+
+Future<void> _pushRoomPlayer(NavigatorState nav, Jellyfin jf, SyncPlay sync) async {
   final now = sync.nowPlaying;
   if (now == null) return;
+  sync._followed = now.playlistItemId;
   final item = await jf.item(now.itemId, fresh: true);
-  if (!context.mounted) return;
-  await Navigator.of(context).push(MaterialPageRoute(
+  await nav.push(MaterialPageRoute(
     builder: (_) => playerScreen(jf, item, sync: sync, playlistItemId: now.playlistItemId, startTicks: now.startTicks),
   ));
 }
@@ -557,6 +677,38 @@ class _TogetherPillState extends State<TogetherPill> {
 
   @override
   Widget build(BuildContext context) {
+    final sync = SyncPlay.of(widget.jf);
+    return ValueListenableBuilder<SyncGroup?>(
+      valueListenable: sync.group,
+      builder: (context, group, _) => group != null ? _partyPill(sync, group) : _roomsPill(),
+    );
+  }
+
+  // In a party: who's in it. Select it for Rejoin / Leave.
+  Widget _partyPill(SyncPlay sync, SyncGroup group) {
+    final others = group.people.where((p) => p != widget.jf.userName).toList();
+    final label = others.isEmpty ? 'Party · waiting for friends' : 'Party with ${others.join(', ')}';
+    return Padding(
+      padding: const EdgeInsets.only(right: 18),
+      child: Focusable(
+        focusNode: widget.focusNode,
+        onSelect: () => showPartyMenu(context, widget.jf),
+        builder: (f) => AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          decoration: BoxDecoration(color: f ? kFg : kPillFill, borderRadius: BorderRadius.circular(999)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.groups_rounded, size: 26, color: f ? kBg : kAccent),
+            const SizedBox(width: 12),
+            Text(label, style: tvBody(20, weight: FontWeight.w700, color: f ? kBg : kFg)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _roomsPill() {
     if (_rooms.isEmpty) return const SizedBox.shrink();
     final people = <String>{for (final r in _rooms) ...((r['Participants'] as List?) ?? []).map((p) => p.toString())};
     final label = _rooms.length == 1
@@ -585,6 +737,96 @@ class _TogetherPillState extends State<TogetherPill> {
             Text(label, style: tvBody(20, weight: FontWeight.w700, color: f ? kBg : kFg)),
             const SizedBox(width: 10),
             Text('Join', style: tvBody(20, weight: FontWeight.w600, color: f ? kBg.withOpacity(0.7) : kMuted)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Your party: who's in it, rejoin what's playing, or leave.
+Future<void> showPartyMenu(BuildContext context, Jellyfin jf) {
+  return showGeneralDialog(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Close',
+    barrierColor: const Color(0x8C06080B),
+    transitionDuration: const Duration(milliseconds: 180),
+    pageBuilder: (ctx, _, __) => _PartyMenu(jf: jf, home: context),
+    transitionBuilder: (ctx, a, _, child) =>
+        FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOut), child: child),
+  );
+}
+
+class _PartyMenu extends StatelessWidget {
+  const _PartyMenu({required this.jf, required this.home});
+  final Jellyfin jf;
+  final BuildContext home;
+
+  @override
+  Widget build(BuildContext context) {
+    final sync = SyncPlay.of(jf);
+    final group = sync.group.value;
+    final playing = sync.nowPlaying;
+    Widget item(IconData icon, String label, VoidCallback onSelect, {bool autofocus = false, bool quiet = false}) =>
+        Focusable(
+          autofocus: autofocus,
+          onSelect: onSelect,
+          builder: (f) => Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: surfaceRow(label, focused: f, icon: icon, quiet: quiet),
+          ),
+        );
+    return PadHints(
+      hints: const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')],
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: (_, e) {
+          if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.escape) {
+            Navigator.of(context).pop();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: TvCanvas(
+          child: Stack(children: [
+            Positioned(
+              right: 120,
+              top: 128,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Surface(
+                  width: 560,
+                  padding: const EdgeInsets.all(18),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                      child: Text('Watch party', style: tvDisplay(30)),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Text(
+                          group == null || group.people.isEmpty ? 'Just you for now' : group.people.join(', '),
+                          style: tvBody(20, color: kMuted)),
+                    ),
+                    if (playing != null)
+                      item(Icons.play_arrow_rounded, 'Join what everyone is watching', () {
+                        Navigator.of(context).pop();
+                        sync._opening = true;
+                        _openRoomPlayer(home, jf, sync).whenComplete(() => sync._opening = false);
+                      }, autofocus: true),
+                    item(Icons.movie_outlined, 'Pick something: it plays for everyone', () => Navigator.of(context).pop(),
+                        autofocus: playing == null),
+                    const SizedBox(height: 8),
+                    item(Icons.logout_rounded, 'Leave party', () {
+                      Navigator.of(context).pop();
+                      leaveParty(home, jf);
+                    }, quiet: true),
+                  ]),
+                ),
+              ),
+            ),
           ]),
         ),
       ),
@@ -668,6 +910,16 @@ class _Rooms extends StatelessWidget {
                           );
                         },
                       ),
+                    Focusable(
+                      onSelect: () {
+                        Navigator.of(context).pop();
+                        startParty(home, jf);
+                      },
+                      builder: (f) => Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: surfaceRow('Start my own party', focused: f, icon: Icons.add_rounded, quiet: true),
+                      ),
+                    ),
                   ]),
                 ),
               ),
@@ -711,7 +963,7 @@ void showInvite(BuildContext context, Jellyfin jf, dynamic room) {
     context,
     picture: bannerInitial(who, a, b),
     who: who,
-    text: what.isEmpty ? 'Started watching together' : 'Started watching $what',
+    text: what.isEmpty || what == 'Watch party' ? 'Started a watch party' : 'Started watching $what',
     line: a,
     action: 'Join',
     onAction: () => joinWatchTogether(context, jf, room['GroupId'].toString()),
@@ -969,7 +1221,7 @@ class RoomFollower extends RoomLink {
     _scheduled?.cancel();
     _seekSend?.cancel();
     _recoverWatch?.cancel();
-    if (!handingOver) sync.leave();
+    // Closing the video doesn't leave the party (see SyncPlay.playerClosed).
   }
 
   // ----- what you do -----
@@ -1299,16 +1551,17 @@ class DirectFollower extends RoomLink {
     _updates?.cancel();
     _tick?.cancel();
     _drift?.cancel();
-    if (!handingOver) {
-      sync.sendDirect({'t': 'bye', 'by': _me});
-      sync.leave();
-    }
+    _hostTimer?.cancel();
+    // Closing the video doesn't leave the party. If this Frame kept time, someone still
+    // watching takes over.
+    if (!handingOver && sync.isHost) sync.sendDirect({'t': 'away', 'by': _me});
   }
 
   // ----- your presses: instant here, then to everyone -----
 
   void _announce(String what) {
     _at = sync.serverMs();
+    sync.log('instant: sent $what at ${_pos.toStringAsFixed(2)} s (${_playing ? 'playing' : 'paused'})');
     sync.sendDirect({'t': 'state', 'playing': _playing, 'pos': _pos, 'at': _at, 'by': _me, 'what': what});
   }
 
@@ -1357,10 +1610,25 @@ class DirectFollower extends RoomLink {
       await setPaused(false);
       _announce('play');
     } else {
-      // Ask the room where it is; the host answers with the current state.
+      // Ask the room where it is; whoever keeps time answers with the current state. Nobody
+      // answering in 4 s (everyone else closed the video): this Frame keeps time from here.
       sync.sendDirect({'t': 'hello', 'by': _me}, freshPeers: true);
+      _hostTimer = Timer(const Duration(seconds: 4), () async {
+        if (_done || _heard) return;
+        sync.log('instant: nobody answered, keeping time here');
+        sync.isHost = true;
+        _selfElected = true;
+        _pos = position();
+        _playing = true;
+        await setPaused(false);
+        _announce('play');
+      });
     }
   }
+
+  Timer? _hostTimer;
+  bool _heard = false; // got the room's state from someone
+  bool _selfElected = false; // took over keeping time because nobody answered
 
   @override
   void stalled(bool stalled) {
@@ -1391,8 +1659,20 @@ class DirectFollower extends RoomLink {
 
   void _onMessage(Map<String, dynamic> m) {
     if (_done) return;
+    if (m['t'] != 'tick') {
+      sync.log('instant: got ${m['t']} from ${m['by'] ?? '?'}'
+          '${m['pos'] is num ? ' at ${(m['pos'] as num).toStringAsFixed(2)} s' : ''}'
+          '${m['what'] != null ? ' (${m['what']})' : ''}');
+    }
     switch (m['t']) {
       case 'state':
+        _heard = true;
+        // Two Frames opened at the same moment and both started keeping time: the one that
+        // took over by itself steps back.
+        if (_selfElected && sync.isHost) {
+          sync.isHost = false;
+          _selfElected = false;
+        }
         final at = (m['at'] as num?)?.toInt() ?? 0;
         if (at < _at) return; // an older press than the one we already follow
         final wasPos = _roomPos;
@@ -1434,6 +1714,14 @@ class DirectFollower extends RoomLink {
         } else {
           _waitingFor.remove(by);
           if (_waitingFor.isEmpty) _apply();
+        }
+      case 'away':
+        // The one keeping time closed the video: the first (by name) still watching takes over.
+        final by = (m['by'] ?? '').toString();
+        final watching = (sync.group.value?.people ?? const <String>[]).where((p) => p != by).toList()..sort();
+        if (_settled && watching.isNotEmpty && watching.first == _me) {
+          sync.isHost = true;
+          sync.log('instant: $by stopped watching, keeping time here');
         }
       case 'bye':
         _waitingFor.remove(m['by']?.toString());
