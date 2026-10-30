@@ -1,7 +1,8 @@
 name: Build iPhone IPA
 
+# Only when started by hand (Actions tab > Build iPhone IPA > Run workflow): Frame has no
+# iPhone setup yet, so running it on every upload would just fail each time.
 on:
-  push:
   workflow_dispatch:
 
 jobs:

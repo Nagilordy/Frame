@@ -33,6 +33,23 @@ jobs:
       - name: Build
         run: flutter build windows --release
 
+      # mpv plays the videos in its own window, like on Linux: real HDR, Dolby Vision and
+      # TrueHD. The current Windows build of mpv goes next to Frame (Frame finds it there).
+      - name: Add mpv
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh api repos/shinchiro/mpv-winbuild-cmake/releases/latest | ConvertFrom-Json
+          # The plain 64-bit player (not the -v3 build for newer CPUs only, not the -dev files).
+          $asset = $release.assets | Where-Object { $_.name -match '^mpv-x86_64-\d{8}-git-.*\.7z$' } | Select-Object -First 1
+          if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -match '^mpv-x86_64-.*\.7z$' -and $_.name -notmatch 'v3' } | Select-Object -First 1 }
+          if (-not $asset) { throw "No mpv build found in $($release.tag_name): $($release.assets.name -join ', ')" }
+          Write-Host "mpv: $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpv.7z
+          7z x mpv.7z -obuild\windows\x64\runner\Release\mpv -y
+          if (-not (Test-Path build\windows\x64\runner\Release\mpv\mpv.exe)) { throw "mpv.exe missing after unpacking" }
+
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
