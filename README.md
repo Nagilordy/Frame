@@ -106,37 +106,16 @@ Vision. Nothing else to install.
 
 Keyboard: arrows, Enter, Escape, Space, Page Up / Page Down, F11.
 
-## Building from source
-
-Frame is a [Flutter](https://flutter.dev) app written in Dart. The controls inside the mpv player
-are a Lua script (`assets/mpv/frame_ui.lua`).
-
-```bash
-flutter pub get
-flutter run -d linux --release      # or: -d windows
-```
-
-Linux builds need the usual Flutter desktop packages plus `libmpv`. The GitHub Actions workflows
-in `.github/workflows` build the Windows installer and the Linux AppImage. Pushing a tag like
-`v0.3` attaches both to a release.
-
 ## Help test Frame
 
 Found a problem? Use the [bug report form](../../issues/new?template=bug_report.yml); it asks for
-everything needed to fix it (system, controller, screen, logs). Ideas go in the
-[feature request form](../../issues/new?template=feature_request.yml). Give a 👍 to existing ideas
-you want too: it's how we pick what comes next.
+everything needed to fix it. Ideas go in the [feature request form](../../issues/new?template=feature_request.yml),
+and a 👍 on ideas you like helps pick what comes next. (You'll need a free GitHub account.)
 
-## Logs
-
-If something goes wrong, these files help find out why:
+If Frame crashed or a video wouldn't play, attaching the latest log file helps a lot:
 
 - Linux: `~/.local/share/frame/logs/`
 - Windows: `%APPDATA%\Frame\logs\`
-
-There are two kinds of log:
-- `perf-<date>.log` covers smoothness, memory and playback stats.
-- `together-<date>.log` covers Watch together messages.
 
 ## Known limitations
 
@@ -150,3 +129,15 @@ There are two kinds of log:
 Built on [Jellyfin](https://jellyfin.org), [mpv](https://mpv.io),
 [media_kit](https://github.com/media-kit/media-kit) and [Flutter](https://flutter.dev).
 Fonts: Hanken Grotesk and Sora (SIL Open Font License).
+Developers: see [Building Frame](docs/BUILDING.md).
+
+## License
+
+© 2026 Nagi Lordy. All rights reserved.
+
+The source is public so you can see how Frame works and report problems. Please don't
+redistribute Frame or modified versions of it. Bug reports and ideas are very welcome; code
+contributions (pull requests) aren't being accepted for now.
+
+Frame uses open-source software (Jellyfin's API, mpv, Flutter, media_kit, Hanken Grotesk and Sora),
+each under its own license.
