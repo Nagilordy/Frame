@@ -54,6 +54,7 @@ What changed in each version of Frame. Newest first.
   (progress bar on top; Audio, Subtitles, Playback and Info on the left with what's in use
   written under each; -10, play, +30 in the middle; button guide on the right). Choosing Audio,
   Subtitles or Playback grows the same sheet upward instead of swapping to a separate menu.
+  The sheet is see-through, so the video shows behind it.
 - **Player sheet for Audio, Subtitles and Playback,** in the new style, with the progress bar on
   top and the video still visible above it.
   - Tabs for Audio, Subtitles and Playback; L1 / R1 (LB / RB) switch between them.

@@ -357,8 +357,8 @@ local function draw_panel(ass)
   local top = H - (has_style and 600 or 500)
   state.panel_rect = { 0, top, W, H }
   hit('sheet', 0, top, W, H, function() end)   -- empty parts of the sheet do nothing
-  rect(ass, 0, 0, W, H, 0, '000000', 'A6')                         -- dim the video
-  rect(ass, 0, top, W, H + 60, 36, SHEET, '08')                     -- the sheet
+  rect(ass, 0, 0, W, H, 0, '000000', 'C0')                         -- dim the video
+  rect(ass, 0, top, W, H + 60, 36, SHEET, '50')                     -- the sheet
   rect(ass, 0, top, W, top + 1, 0, FG, 'EB')
 
   -- Progress, so you never lose your place
@@ -703,7 +703,7 @@ local function render()
     local cached = mp.get_property_number('demuxer-cache-time', 0) or 0
 
     shade(ass, 0, 230, false)
-    if state.panel then shade(ass, H - 330, H, true) end
+    shade(ass, H - 330, H, true)   -- keeps the see-through sheet readable over bright scenes
 
     -- Top: Back, title, quality
     local back_focus = state.zone == 'back'
@@ -719,7 +719,7 @@ local function render()
     if not state.panel then   -- with a sheet open, the sheet has its own progress bar
     -- The bar: the same sheet as Audio / Subtitles, folded down. Choosing a tab grows it.
     local top = H - 250
-    rect(ass, 0, top, W, H + 60, 36, SHEET, '08')
+    rect(ass, 0, top, W, H + 60, 36, SHEET, '6A')
     rect(ass, W / 2 - 32, top + 10, W / 2 + 32, top + 15, 2.5, FG, 'BF')   -- handle: it opens further
     hit('sheet_bar', 0, top, W, H, function() end)
 
