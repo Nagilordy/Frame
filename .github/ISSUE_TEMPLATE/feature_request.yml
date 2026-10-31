@@ -1,0 +1,71 @@
+name: Feature request
+description: An idea for something new in Frame, or a way to make something better
+title: "[Idea]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Check the [open issues](https://github.com/Nagilordy/Frame/issues?q=is%3Aopen+label%3Aenhancement) first: if it's already there, add a 👍 to it instead (that's how we see what people want most).
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like?
+      description: Describe the idea in a few sentences.
+      placeholder: "Example: a search in the libraries, so I can find a show by typing part of its name."
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why? What's hard or missing today?
+      description: The problem behind the idea helps us find the best way to do it.
+      placeholder: "Example: my Anime library has 800 shows; scrolling with the controller takes ages."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where in Frame?
+      options:
+        - Home
+        - Library (Movies, Shows, Anime…)
+        - Show or movie page
+        - Player (playback, controls, subtitles, audio)
+        - Watch party
+        - Profiles / sign in / settings
+        - Something new (a new screen or feature)
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: textarea
+    id: how
+    attributes:
+      label: How do you picture it? (optional)
+      description: How it would look or work. Another app that does it well, a sketch or a screenshot are all welcome.
+
+  - type: dropdown
+    id: importance
+    attributes:
+      label: How much would it change things for you?
+      options:
+        - Nice to have
+        - I'd use it often
+        - It's what stops me from using Frame every day
+    validations:
+      required: true
+
+  - type: dropdown
+    id: input
+    attributes:
+      label: How do you mostly use Frame?
+      multiple: true
+      options:
+        - With a controller, from the couch
+        - With mouse and keyboard
+        - On Linux
+        - On Windows
