@@ -138,12 +138,46 @@ Future<void> _findMpv() async {
       if (r.exitCode == 0 && p.isNotEmpty) _mpvPath = p;
     } catch (_) {}
   }
+  // Frame's own AppImage runs from an unpacked copy (see _unpacked).
+  if (_mpvPath == _ownMpv) _mpvPath = await _unpacked(_ownMpv) ?? _ownMpv;
   if (_mpvPath != null) _mpvVersion = await _cachedVersionOf(_mpvPath!);
   debugPrint(_mpvPath == null
       ? 'Player: no mpv found, using the in-app player for now'
       : 'Player: videos play in mpv ${_mpvVersion.toStringAsFixed(2)} ($_mpvPath)'
           '${_mpvHasHdr ? ', HDR on' : ''}');
   if (!_mpvHasHdr) unawaited(_fetchMpv());
+}
+
+/// Frame's mpv AppImage, unpacked once into its own folder, and run from there.
+///
+/// Run as an AppImage, mpv mounts itself in /tmp on every start. A start that's cut short (mpv
+/// closed at the end of a video, the computer put to sleep) can leave that mount behind, and
+/// every later start then refuses to reuse it and quits at once, without a word ("mpv closed
+/// while starting"). Unpacked, there's nothing to mount: no such failure, and a quicker start.
+/// Unpacked again only when the AppImage changes. Returns null (use the AppImage) if it fails.
+Future<String?> _unpacked(String appImage) async {
+  try {
+    final dir = Directory('$_ownMpvDir/unpacked');
+    final run = File('${dir.path}/squashfs-root/AppRun');
+    final stamp = File('${dir.path}/from.txt');
+    final stat = await File(appImage).stat();
+    final from = '${stat.size} ${stat.modified.millisecondsSinceEpoch}';
+    if (await run.exists() && await stamp.exists() && (await stamp.readAsString()) == from) return run.path;
+    if (await dir.exists()) await dir.delete(recursive: true);
+    await dir.create(recursive: true);
+    final r = await Process.run(appImage, ['--appimage-extract'], workingDirectory: dir.path, environment: _mpvEnv)
+        .timeout(const Duration(minutes: 2));
+    if (r.exitCode != 0 || !await run.exists()) {
+      debugPrint('Player: could not unpack mpv (code ${r.exitCode}), using the AppImage as it is');
+      return null;
+    }
+    await stamp.writeAsString(from);
+    debugPrint('Player: mpv unpacked into ${dir.path}');
+    return run.path;
+  } catch (e) {
+    debugPrint('Player: could not unpack mpv ($e), using the AppImage as it is');
+    return null;
+  }
 }
 
 /// Downloads a current mpv (a self-contained AppImage that runs on any Linux) into Frame's
@@ -175,7 +209,7 @@ Future<void> _fetchMpv() async {
     final version = await _versionOf(part.path);
     if (version < 0.40) throw 'the downloaded mpv did not run (version $version)';
     await part.rename(_ownMpv);
-    _mpvPath = _ownMpv;
+    _mpvPath = await _unpacked(_ownMpv) ?? _ownMpv;
     _mpvVersion = version;
     debugPrint('Player: mpv ${version.toStringAsFixed(2)} ready, HDR and Dolby Vision on from the next video');
   } catch (e) {
@@ -273,8 +307,10 @@ class _Mpv {
     _socketPath = socketPath;
     _process = await Process.start(mpv, [...args, '--input-ipc-server=$socketPath'], environment: _mpvEnv);
     var exited = false;
-    _process!.exitCode.then((_) {
+    _process!.exitCode.then((code) {
       exited = true;
+      // Closed before Frame could connect: say how, since mpv may not have printed anything.
+      if (_socket == null) debugPrint('mpv: closed while starting, exit code $code ($mpv)');
       // Tidy up mpv's control socket file.
       File(socketPath).delete().then((_) {}, onError: (_) {});
     });

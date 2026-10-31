@@ -43,6 +43,7 @@ local state = {
   requests = 0,
 }
 local hide_timer = nil
+local frame_pad = 'none' -- the controller style Frame last told us (state.pad may be hidden since)
 
 -- ---------- Talking to Frame ----------
 
@@ -759,10 +760,18 @@ local function key(k)
   show()
 end
 
-mp.register_script_message('key', key)
-mp.register_script_message('pad', function(style) state.pad = style or 'none'; render() end)
-mp.observe_property('user-data/frame/pad', 'string', function(_, style)
-  if style and style ~= '' then state.pad = style; render() end
+-- Buttons from Frame come from the controller. If the mouse or keyboard hid the controller
+-- legend meanwhile, bring it back: Frame never saw those mouse/keyboard events (they went to
+-- this window), so it still thinks the controller is in use and wouldn't tell us again.
+mp.register_script_message('key', function(k)
+  if state.pad == 'none' and frame_pad ~= 'none' then state.pad = frame_pad end
+  key(k)
+end)
+mp.register_script_message('pad', function(style) state.pad = style or 'none'; frame_pad = state.pad; render() end)
+-- Read as 'native': read as a string, mpv hands user-data back as JSON ('"ps"', with quotes),
+-- which never matched 'ps', so the PlayStation symbols were never drawn.
+mp.observe_property('user-data/frame/pad', 'native', function(_, style)
+  if type(style) == 'string' and style ~= '' then state.pad = style; frame_pad = style; render() end
 end)
 local notice_timer = nil
 mp.register_script_message('notice', function(text)

@@ -23,6 +23,9 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName=Frame
+; Frame's icon on the installer itself and in Windows' list of installed apps.
+SetupIconFile=..\packaging\app_icon.ico
+UninstallDisplayIcon={app}\player_test.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "Add a desktop icon"; GroupDescription: "Shortcuts:"

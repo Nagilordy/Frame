@@ -31,6 +31,7 @@ What changed in each version of Frame. Newest first.
   TrueHD. The installer now includes mpv. Without it, Frame falls back to its built-in player.
 
 ### Improved
+- **New app icon** on Linux (AppImage) and Windows (taskbar, Start menu, installer).
 - **Continue watching shows your next episode.** Finish an episode and the next one waits at
   the front of the row, mixed with what you stopped part-way, newest first.
 - **Faster launch:** Frame no longer waits to check its video player before opening its window.
@@ -68,6 +69,12 @@ What changed in each version of Frame. Newest first.
 - **Windows keeps HDR and Dolby Vision** even if the bundled mpv can't report its version.
 - **Playback info (Triangle) shows in the Windows player** again. The box failed to draw.
 - Going from one video to the next no longer turns off full screen control in the new player.
+- **The player shows PlayStation buttons with a PlayStation controller.** Its legend always
+  drew Xbox letters (A, B, LB, RB), even when Frame's own screens showed PlayStation symbols.
+- **"mpv closed while starting" on Linux is gone.** Frame now runs its mpv from an unpacked copy,
+  so a video cut short can no longer leave mpv unable to start (and videos open a bit faster).
+- **Controller legend comes back in the player** when you pick the controller up again after
+  using the mouse or keyboard.
 - **Frame no longer drops out of full screen** when you leave a video.
 - **No more crash message** when the controller is touched just as the player closes.
 

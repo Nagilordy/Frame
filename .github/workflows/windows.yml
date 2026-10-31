@@ -29,6 +29,11 @@ jobs:
         shell: pwsh
         run: if (-not (Test-Path windows)) { flutter create --platforms=windows --project-name player_test . }
 
+      # Frame's own icon (taskbar, window, Start menu, .exe) instead of Flutter's default.
+      - name: Frame icon
+        shell: pwsh
+        run: Copy-Item packaging\app_icon.ico windows\runner\resources\app_icon.ico -Force
+
       - name: Build
         run: flutter build windows --release
 
