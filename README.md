@@ -1,6 +1,14 @@
-# Frame
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/icon.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/logo/reverse.svg">
+    <img src="docs/logo/icon.svg" alt="Frame logo" width="128">
+  </picture>
+</p>
 
-### Your Jellyfin library, the way a console would show it.
+<h1 align="center">Frame</h1>
+
+<p align="center"><b>Your Jellyfin library, the way a console would show it.</b></p>
 
 Frame is a couch-first app for **Jellyfin**: full-screen artwork, big readable menus, made for a
 **controller** but just as good with a mouse and keyboard. It plays your original files straight
