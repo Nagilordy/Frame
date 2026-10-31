@@ -308,10 +308,11 @@ class _Mpv {
     _socketPath = socketPath;
     _process = await Process.start(mpv, [...args, '--input-ipc-server=$socketPath'], environment: _mpvEnv);
     var exited = false;
+    var connected = false; // (the socket is cleared again when mpv quits, so it can't tell)
     _process!.exitCode.then((code) {
       exited = true;
       // Closed before Frame could connect: say how, since mpv may not have printed anything.
-      if (_socket == null) debugPrint('mpv: closed while starting, exit code $code ($mpv)');
+      if (!connected) debugPrint('mpv: closed while starting, exit code $code ($mpv)');
       // Tidy up mpv's control socket file.
       File(socketPath).delete().then((_) {}, onError: (_) {});
     });
@@ -326,6 +327,7 @@ class _Mpv {
     for (var i = 0; i < 100 && _socket == null && !exited; i++) {
       try {
         _socket = await Socket.connect(InternetAddress(socketPath, type: InternetAddressType.unix), 0);
+        connected = true;
       } catch (_) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
@@ -582,9 +584,36 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   String get _loadingLine =>
       _item['Type'] == 'Episode' ? episodeLine(_item) : (_item['ProductionYear']?.toString() ?? '');
 
+  // The loading screen's shading over the artwork (same in Frame and in the player's picture):
+  // dark on the left where the text is, and dark along the bottom.
+  static final _loadingShades = [
+    (from: const Offset(0, 0.5), to: const Offset(1, 0.5),
+        colors: [kBg.withOpacity(0.85), kBg.withOpacity(0.35), kBg.withOpacity(0.10)], stops: const [0.0, 0.55, 1.0]),
+    (from: const Offset(0.5, 1), to: const Offset(0.5, 0),
+        colors: [kBg.withOpacity(0.85), kBg.withOpacity(0)], stops: const [0.0, 0.5]),
+  ];
+
+  bool _pictureHasLogo = false; // the logo is part of the picture (else the player writes the title)
+
+  /// Chips under the episode line: how it plays (quality, HDR, sound).
+  List<String> get _loadingChips =>
+      qualityLine(_item).split(' · ').where((x) => x.trim().isNotEmpty).toList();
+
+  /// Under the running line: where it starts.
+  String get _loadingStatus {
+    final ticks = _resumeTicks;
+    if (ticks <= 0) return 'Starting';
+    final secs = ticks ~/ 10000000;
+    final h = secs ~/ 3600, m = (secs % 3600) ~/ 60, sec = secs % 60;
+    final at = h > 0 ? '$h:${m.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}' : '$m:${sec.toString().padLeft(2, '0')}';
+    return 'Resumes at $at';
+  }
+
+  // The loading screen's artwork, shading and logo as one picture the size of the player's
+  // window, placed underneath the player's own drawing (frame_ui.lua draws the text, chips
+  // and line on top, at the same places as _loadingView). Name kept from when it was only
+  // the logo.
   Future<void> _showLogoInPlayer() async {
-    final url = widget.jf.logoFor(_item);
-    if (url == null) return;
     try {
       // The player window's size, once it's up.
       Map? osd;
@@ -597,41 +626,82 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
         await Future.delayed(const Duration(milliseconds: 100));
       }
       if (osd == null || _ended) return;
-      final ow = (osd['w'] as num).toDouble(), oh = (osd['h'] as num).toDouble();
-      final scale = oh / 1080;
-      final res = await Jellyfin.client.get(Uri.parse(url)).timeout(const Duration(seconds: 5));
-      if (res.statusCode != 200) return;
-      final codec = await ui.instantiateImageCodec(res.bodyBytes, targetHeight: (160 * scale).round());
-      var image = (await codec.getNextFrame()).image;
-      if (await logoNeedsMatte(url, image)) return; // a logo on a black box: the title as text instead
-      // Fit the 900 x 160 box like Frame does (BoxFit.contain).
-      if (image.width > 900 * scale) {
-        final c2 = await ui.instantiateImageCodec(res.bodyBytes, targetWidth: (900 * scale).round());
-        image = (await c2.getNextFrame()).image;
+      final ow = (osd['w'] as num).round(), oh = (osd['h'] as num).round();
+      final s = oh / 1080;
+
+      Future<ui.Image?> fetch(String? url, {int? width, int? height}) async {
+        if (url == null) return null;
+        try {
+          final res = await Jellyfin.client.get(Uri.parse(url)).timeout(const Duration(seconds: 5));
+          if (res.statusCode != 200) return null;
+          final codec = await ui.instantiateImageCodec(res.bodyBytes, targetWidth: width, targetHeight: height);
+          return (await codec.getNextFrame()).image;
+        } catch (_) {
+          return null;
+        }
       }
-      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba); // premultiplied
+
+      final logoUrl = widget.jf.logoFor(_item);
+      final results = await Future.wait([
+        fetch(widget.jf.backdropFor(_item, maxWidth: ow.clamp(1280, 3840)), width: ow),
+        fetch(logoUrl, height: (150 * s).round()),
+      ]);
+      final backdrop = results[0];
+      var logo = results[1];
+      if (logo != null && logoUrl != null && await logoNeedsMatte(logoUrl, logo)) logo = null;
+      if (_ended || _videoStarted) return;
+
+      final recorder = ui.PictureRecorder();
+      final c = Canvas(recorder);
+      final full = Rect.fromLTWH(0, 0, ow.toDouble(), oh.toDouble());
+      c.drawRect(full, Paint()..color = kBg);
+      if (backdrop != null) {
+        // cover: fill the window, cropping the middle
+        final iw = backdrop.width.toDouble(), ih = backdrop.height.toDouble();
+        final scale = (ow / iw) > (oh / ih) ? ow / iw : oh / ih;
+        final sw = ow / scale, sh = oh / scale;
+        c.drawImageRect(backdrop, Rect.fromLTWH((iw - sw) / 2, (ih - sh) / 2, sw, sh), full,
+            Paint()..filterQuality = FilterQuality.medium);
+      }
+      for (final g in _loadingShades) {
+        c.drawRect(
+            full,
+            Paint()
+              ..shader = ui.Gradient.linear(
+                  Offset(g.from.dx * ow, g.from.dy * oh), Offset(g.to.dx * ow, g.to.dy * oh), g.colors, g.stops));
+      }
+      _pictureHasLogo = false;
+      if (logo != null) {
+        // contain in the 760 x 150 box at (120, 430), bottom left
+        final box = Size(760 * s, 150 * s);
+        final k = [box.width / logo.width, box.height / logo.height, 1.0].reduce((a, b) => a < b ? a : b);
+        final w = logo.width * k, h = logo.height * k;
+        c.drawImageRect(logo, Rect.fromLTWH(0, 0, logo.width.toDouble(), logo.height.toDouble()),
+            Rect.fromLTWH(120 * s, (430 + 150) * s - h, w, h), Paint()..filterQuality = FilterQuality.medium);
+        _pictureHasLogo = true;
+      }
+      final image = await recorder.endRecording().toImage(ow, oh);
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
       if (data == null || _ended || _videoStarted) return; // too late: the video is already on
-      final px = data.buffer.asUint8List();
-      for (var i = 0; i < px.length; i += 4) {
-        final r = px[i];
-        px[i] = px[i + 2]; // mpv wants blue-green-red-alpha
-        px[i + 2] = r;
+      // mpv wants blue-green-red-alpha: swap red and blue, four bytes at a time
+      final px = data.buffer.asUint32List(data.offsetInBytes, data.lengthInBytes ~/ 4);
+      for (var i = 0; i < px.length; i++) {
+        final v = px[i];
+        px[i] = (v & 0xFF00FF00) | ((v & 0xFF) << 16) | ((v >> 16) & 0xFF);
       }
       final file = File('${Directory.systemTemp.path}${Platform.pathSeparator}frame-logo-$pid.bgra');
-      await file.writeAsBytes(px, flush: true);
-      final x = ((ow - image.width) / 2).round();
-      final y = (500 * scale - image.height / 2).round();
+      await file.writeAsBytes(data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes), flush: true);
       if (_ended || _videoStarted) return;
       // Marked shown before the command goes out, so a 'loaded' arriving meanwhile still
       // removes it (the removal is sent after the add, and mpv runs them in order).
       _logoShown = true;
-      await _mpv.command(['overlay-add', 0, x, y, file.path, 0, 'bgra', image.width, image.height, image.width * 4]);
+      await _mpv.command(['overlay-add', 0, 0, 0, file.path, 0, 'bgra', ow, oh, ow * 4]);
       if (_videoStarted) _removeLogoFromPlayer();
     } catch (e) {
-      debugPrint('Player: logo for the loading screen unavailable ($e)');
+      debugPrint('Player: picture for the loading screen unavailable ($e)');
     } finally {
       if (!_logoShown) _logoFailed = true;
-      if (!_ended && !_videoStarted) await _sendInfo(); // logo up, or the title as text instead
+      if (!_ended && !_videoStarted) await _sendInfo(); // picture up, or the title as text instead
     }
   }
 
@@ -675,8 +745,6 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // The next episode's picture for the Up next card, downloaded once while this one plays.
   // The player's controls cut a hole in the card and ask for it with 'next_image'.
   Uint8List? _nextPicture;
-  String? _nextPictureShown; // what's on screen now ("x,y,w,h"), or null
-  String? _nextPictureFile;
 
   Future<void> _loadNextPicture() async {
     final next = _next;
@@ -693,34 +761,36 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     }
   }
 
+  // Pictures the player's controls ask for (Up next = 1, Info = 2), placed in a hole the
+  // controls cut for them, since mpv draws pictures underneath its controls.
+  final Map<int, String> _picturesShown = {}; // id -> "x,y,w,h" on screen now
+
+  Future<void> _showNextPicture(Map value) => _placePicture(1, _nextPicture, value);
+
   // x, y, w, h are in the controls' 1920 x 1080 space.
-  Future<void> _showNextPicture(Map value) async {
-    final show = value['show'] == true;
-    if (!show) {
-      if (_nextPictureShown != null) {
-        _nextPictureShown = null;
-        _mpv.command(['overlay-remove', 1]).then((_) {}, onError: (_) {});
-      }
+  Future<void> _placePicture(int id, Uint8List? bytes, Map value) async {
+    if (value['show'] != true) {
+      if (_picturesShown.remove(id) != null) _mpv.command(['overlay-remove', id]).then((_) {}, onError: (_) {});
       return;
     }
-    final bytes = _nextPicture;
     if (bytes == null) return;
     try {
       final d = await _mpv.get('osd-dimensions');
       if (d is! Map) return;
       final ow = ((d['w'] ?? 0) as num).toDouble(), oh = ((d['h'] ?? 0) as num).toDouble();
       if (ow <= 0 || oh <= 0) return;
-      final sx = ow / 1920, sy = oh / 1080;
-      final x = ((value['x'] as num) * sx).round(), y = ((value['y'] as num) * sy).round();
-      final w = ((value['w'] as num) * sx).round(), h = ((value['h'] as num) * sy).round();
+      // the controls keep 1080 units of height and widen to the window's shape
+      final s = oh / 1080;
+      final x = ((value['x'] as num) * s).round(), y = ((value['y'] as num) * s).round();
+      final w = ((value['w'] as num) * s).round(), h = ((value['h'] as num) * s).round();
       final key = '$x,$y,$w,$h';
-      if (key == _nextPictureShown) return;
+      if (_picturesShown[id] == key) return;
       final codec = await ui.instantiateImageCodec(bytes, targetWidth: w, targetHeight: h);
       final image = (await codec.getNextFrame()).image;
       final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba); // premultiplied
       if (data == null || _ended) return;
       final px = data.buffer.asUint8List();
-      final r = 16 * sy; // round corners, like the cards in Frame
+      final r = 16 * s; // round corners, like the cards in Frame
       for (var j = 0; j < h; j++) {
         for (var i = 0; i < w; i++) {
           final o = (j * w + i) * 4;
@@ -734,14 +804,41 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
           }
         }
       }
-      final file = _nextPictureFile ??= '${Directory.systemTemp.path}${Platform.pathSeparator}frame-next-$pid.bgra';
+      final file = '${Directory.systemTemp.path}${Platform.pathSeparator}frame-pic-$id-$pid.bgra';
       await File(file).writeAsBytes(px, flush: true);
       if (_ended) return;
-      _nextPictureShown = key;
-      await _mpv.command(['overlay-add', 1, x, y, file, 0, 'bgra', w, h, w * 4]);
+      _picturesShown[id] = key;
+      await _mpv.command(['overlay-add', id, x, y, file, 0, 'bgra', w, h, w * 4]);
     } catch (e) {
-      debugPrint('Player: up next picture not shown ($e)');
+      debugPrint('Player: picture $id not shown ($e)');
     }
+  }
+
+  // Info (Triangle): this video's picture, downloaded once.
+  Uint8List? _infoPicture;
+
+  Future<void> _loadInfoPicture() async {
+    try {
+      final res = await Jellyfin.client
+          .get(Uri.parse(widget.jf.thumbFor(_item, maxWidth: 640)))
+          .timeout(const Duration(seconds: 6));
+      if (res.statusCode != 200 || res.bodyBytes.isEmpty || _ended) return;
+      _infoPicture = res.bodyBytes;
+      await _sendInfo();
+    } catch (e) {
+      debugPrint('Player: no picture for Info ($e)');
+    }
+  }
+
+  /// Info's line under the title: S17 · E19 · 2006 · 22 min (or year · length for a movie).
+  String get _aboutLine {
+    final parts = <String>[
+      if (_item['ParentIndexNumber'] != null) 'S${_item['ParentIndexNumber']}',
+      if (_item['IndexNumber'] != null && _item['Type'] == 'Episode') 'E${_item['IndexNumber']}',
+      if (_item['ProductionYear'] != null) '${_item['ProductionYear']}',
+      if (_item['RunTimeTicks'] is num) '${((_item['RunTimeTicks'] as num) / 600000000).round()} min',
+    ];
+    return parts.join(' · ');
   }
 
   // The file reached its end (mpv holds the last picture): next episode, or close.
@@ -958,6 +1055,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       _startTogether();
     }
     unawaited(_findNext());
+    unawaited(_loadInfoPicture());
     unawaited(_handOff());
     unawaited(_showLogoInPlayer());
     _mpv.observe(4, 'user-data/frame/request');
@@ -1250,6 +1348,9 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       case 'next_image':
         if (value is Map) await _showNextPicture(value);
         return;
+      case 'info_image':
+        if (value is Map) await _placePicture(2, _infoPicture, value);
+        return;
       case 'loaded':
         _videoStarted = true;
         _removeLogoFromPlayer(); // the loading screen fades into the video
@@ -1282,9 +1383,17 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     final defaultAudio = audio.cast<dynamic>().firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index'];
     await _mpv.set('user-data/frame/info', {
       'title': titleOf(_item),
-      'logo': _logoShown,
+      'logo': _logoShown && _pictureHasLogo,
+      'backdrop': _logoShown,
       'logo_coming': !_logoFailed && widget.jf.logoFor(_item) != null,
       'loading_line': _loadingLine,
+      'loading_chips': _loadingChips,
+      'loading_status': _loadingStatus,
+      // Info (Triangle)
+      'about_title': (_item['Type'] == 'Episode' ? _item['Name'] : titleOf(_item))?.toString() ?? '',
+      'about_line': _aboutLine,
+      'overview': (_item['Overview'] ?? '').toString(),
+      'info_thumb': _infoPicture != null,
       'subtitle': subtitleLine,
       'quality': qualityLine(_item),
       'mode': _mode,
@@ -1776,7 +1885,9 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   Widget build(BuildContext context) {
     return PadHints(
       // The legend is drawn inside mpv; only the error screen here needs one.
-      hints: _error != null ? const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Back')] : const [],
+      hints: _error != null
+          ? const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Back')]
+          : const [PadHint(PadButton.back, 'Cancel')],
       child: Focus(
         focusNode: _focus,
         autofocus: true,
@@ -1789,71 +1900,81 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     );
   }
 
-  // Play pressed: the page's artwork dims away and the title settles in the centre, the same
-  // screen the player opens on (frame_ui.lua draws it at the same place), so the switch to the
-  // player's window can't be seen.
+  // Play pressed: like starting a game on PS5, the artwork full screen with the logo bottom
+  // left, the episode line, chips, a running line and where it starts. The player opens on the
+  // same screen (frame_ui.lua draws it at the same places), so the switch can't be seen.
   Widget _loadingView() {
     final logo = widget.jf.logoFor(_item);
-    final title = Text(titleOf(_item), textAlign: TextAlign.center, style: tvDisplay(64), maxLines: 2);
+    final title = Text(titleOf(_item), style: tvDisplay(84), maxLines: 1, overflow: TextOverflow.ellipsis);
     final line = _loadingLine;
-    return TweenAnimationBuilder<double>(
-      tween: Tween(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 650),
-      curve: Curves.easeOutCubic,
-      builder: (context, t, _) => Stack(children: [
+    final now = DateTime.now();
+    final clock = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    return Stack(children: [
+      Positioned.fill(
+        child: netImage(
+          widget.jf.backdropFor(_item, maxWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560)),
+          cacheWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+        ),
+      ),
+      for (final g in _loadingShades)
         Positioned.fill(
-          child: Opacity(
-            opacity: (1 - t) * 0.6,
-            child: Transform.scale(
-              scale: 1 + 0.05 * t,
-              child: netImage(
-                widget.jf.backdropFor(_item, maxWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560)),
-                cacheWidth: sizeBucket(tvPx(1920)).clamp(1280, 2560),
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment(g.from.dx * 2 - 1, g.from.dy * 2 - 1),
+                end: Alignment(g.to.dx * 2 - 1, g.to.dy * 2 - 1),
+                colors: g.colors,
+                stops: g.stops,
               ),
             ),
           ),
         ),
-        Positioned(
-          left: 0,
-          right: 0,
-          top: 420,
-          height: 160,
-          child: Center(
-            child: SizedBox(
-              width: 900,
-              height: 160,
-              child: logo == null
-                  ? Center(child: title)
-                  : LogoImage(url: logo, height: 160, cacheHeight: tvPx(160), alignment: Alignment.center, fallback: Center(child: title)),
+      Positioned(right: 56, top: 48, child: Text(clock, style: tvBody(26, weight: FontWeight.w600, color: kSoft))),
+      Positioned(
+        left: 120,
+        top: 430,
+        width: 760,
+        height: 150,
+        child: logo == null
+            ? Align(alignment: Alignment.bottomLeft, child: title)
+            : LogoImage(
+                url: logo,
+                height: 150,
+                cacheHeight: tvPx(150),
+                alignment: Alignment.bottomLeft,
+                fallback: Align(alignment: Alignment.bottomLeft, child: title)),
+      ),
+      if (line.isNotEmpty)
+        Positioned(left: 120, top: 604, right: 120, child: Text(line, maxLines: 1, style: tvBody(28, color: kSoft))),
+      Positioned(
+        left: 120,
+        top: 660,
+        child: Row(children: [
+          for (final chip in _loadingChips)
+            Container(
+              height: 40,
+              margin: const EdgeInsets.only(right: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: kFg.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+              child: Text(chip, style: tvBody(19, weight: FontWeight.w600)),
             ),
-          ),
+        ]),
+      ),
+      Positioned(
+        left: 120,
+        top: 742,
+        width: 420,
+        height: 4,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(backgroundColor: kFg.withOpacity(0.16), color: kFg),
         ),
-        if (line.isNotEmpty)
-          Positioned(
-            left: 0,
-            right: 0,
-            top: 606,
-            child: Text(line, textAlign: TextAlign.center, style: tvBody(26, color: kSoft)),
-          ),
-        Positioned(
-          left: 0,
-          right: 0,
-          top: 678,
-          child: Center(
-            child: SizedBox(
-              width: 240,
-              height: 4,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(2),
-                child: LinearProgressIndicator(backgroundColor: kFg.withOpacity(0.12), color: kAccent),
-              ),
-            ),
-          ),
-        ),
-      ]),
-    );
+      ),
+      Positioned(left: 120, top: 764, child: Text(_loadingStatus, style: tvBody(21, color: kMuted))),
+    ]);
   }
 
   // Something went wrong: a centred card (like the other new menus) over the faded artwork of

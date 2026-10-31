@@ -33,7 +33,6 @@ local state = {
   button = 6,            -- which bottom button has focus (6 = play)
   panel = nil,           -- nil | 'playback' | 'audio' | 'subtitles'
   panel_focus = 1,
-  info_box = false,
   pad = 'none',          -- controller legend: ps | xbox | none
   info = {},             -- from Frame
   hits = {},             -- clickable areas from the last drawing
@@ -286,7 +285,7 @@ end
 -- menus. The progress bar stays on top of it, tabs switch with L1 / R1, tracks are big cards
 -- in a row (left / right), and the subtitle style is a row of small choices under them.
 local SHEET = '1B1512' -- #12151B
-local tabs = { { 'audio', 'Audio' }, { 'subtitles', 'Subtitles' }, { 'playback', 'Playback' } }
+local tabs = { { 'audio', 'Audio' }, { 'subtitles', 'Subtitles' }, { 'playback', 'Playback' }, { 'info', 'Info' } }
 
 local function is_card(row) return row and not row.style end
 
@@ -339,6 +338,107 @@ function current_value(name)
   return name == 'subtitles' and 'Off' or ''
 end
 
+-- ---------- Info (Triangle): the episode on the left, the details on the right ----------
+
+-- Word-wraps text to lines of about n characters (at most max lines, the last with "…").
+local function wrap(str, n, max)
+  local lines, cur = {}, ''
+  for word in (str or ''):gmatch('%S+') do
+    if cur == '' then cur = word
+    elseif utf8_len(cur) + 1 + utf8_len(word) <= n then cur = cur .. ' ' .. word
+    else
+      lines[#lines + 1] = cur
+      cur = word
+      if #lines == max then break end
+    end
+  end
+  if cur ~= '' and #lines < max then lines[#lines + 1] = cur
+  elseif #lines == max then lines[max] = shorten(lines[max], n - 1) .. (lines[max]:sub(-3) == '…' and '' or '…') end
+  return lines
+end
+
+-- The episode picture is placed by Frame in a hole in the sheet (like Up next's).
+function send_info_pic(geom)
+  local key = geom and table.concat(geom, ',') or 'off'
+  if key == state.info_pic_sent then return end
+  state.info_pic_sent = key
+  request('info_image', geom and { show = true, x = geom[1], y = geom[2], w = geom[3], h = geom[4] } or { show = false })
+end
+
+local function video_line()
+  local vp = mp.get_property_native('video-params') or {}
+  local parts = {}
+  local h, w = vp.h or 0, vp.w or 0
+  if h > 0 then
+    parts[#parts + 1] = (w >= 3200 or h >= 2000) and '4K' or (w >= 1800 or h >= 1000) and '1080p'
+      or (w >= 1200 or h >= 700) and '720p' or (h .. 'p')
+  end
+  local codec = mp.get_property('video-format') or ''
+  if codec ~= '' then parts[#parts + 1] = codec:upper() end
+  local fps = mp.get_property_number('container-fps')
+  if fps and fps > 0 then parts[#parts + 1] = (string.format('%.3f', fps):gsub('0+$', ''):gsub('%.$', '')) .. ' fps' end
+  local q = tostring(state.info.quality or '')
+  parts[#parts + 1] = q:find('Dolby') and 'Dolby Vision' or (vp.gamma == 'pq' or vp.gamma == 'hlg' or q:find('HDR')) and 'HDR' or 'SDR'
+  return table.concat(parts, ' · ')
+end
+
+local function screen_line()
+  local tp = mp.get_property_native('video-target-params') or {}
+  local parts = { (tp.gamma == 'pq' or tp.gamma == 'hlg') and 'HDR' or 'SDR' }
+  local hz = mp.get_property_number('display-fps')
+  if hz and hz > 0 then parts[#parts + 1] = math.floor(hz + 0.5) .. ' Hz' end
+  local d = mp.get_property_native('osd-dimensions') or {}
+  if d.w and d.w > 0 then parts[#parts + 1] = d.w .. ' × ' .. d.h end
+  return table.concat(parts, ' · ')
+end
+
+function draw_info(ass, y0)
+  local info = state.info
+  -- left: picture, title, line, summary
+  local px0, py0, pw, ph = 56, y0 + 6, 300, 169
+  if info.info_thumb then
+    send_info_pic({ px0, py0, pw, ph })
+  else
+    send_info_pic(nil)
+    rect(ass, px0, py0, px0 + pw, py0 + ph, 18, FG, 'DE')
+  end
+  local lx = px0 + pw + 28
+  text(ass, lx, y0 + 4, 7, DISPLAY, 30, 700, FG, shorten(info.about_title or info.title or '', 28))
+  local line = info.about_line or ''
+  local dur = mp.get_property_number('duration', 0) or 0
+  local pos = mp.get_property_number('time-pos', 0) or 0
+  if dur > 0 then
+    local speed = mp.get_property_number('speed', 1) or 1
+    line = (line ~= '' and line .. ' · ' or '') .. 'Ends at ' .. os.date('%H:%M', os.time() + math.floor((dur - pos) / speed))
+  end
+  text(ass, lx, y0 + 50, 7, BODY, 21, 500, SOFT, line)
+  for i, l in ipairs(wrap(info.overview or '', 46, 4)) do
+    text(ass, lx, y0 + 92 + (i - 1) * 31, 7, BODY, 21, 500, MUTED, l)
+  end
+
+  -- right: the details
+  local hw = mp.get_property('hwdec-current') or 'no'
+  local cache = tonumber(mp.get_property('demuxer-cache-duration') or '0') or 0
+  local drops = tonumber(mp.get_property('frame-drop-count') or '0') or 0
+  local buffered = cache >= 60 and (math.floor(cache / 60) .. ' min ' .. math.floor(cache % 60) .. ' s') or (math.floor(cache) .. ' s')
+  local rows = {
+    { 'Video', video_line() },
+    { 'Audio', current_value('audio') },
+    { 'Subtitles', current_value('subtitles') },
+    { 'Playing', info.server and 'Converted by your server' or 'Original file · direct play' },
+    { 'Decoder', (hw == '' or hw == 'no') and 'CPU' or ('GPU · ' .. (hw:gsub('^%l', string.upper))) },
+    { 'Buffered', buffered .. ' · ' .. drops .. (drops == 1 and ' dropped frame' or ' dropped frames') },
+    { 'Your screen', screen_line() },
+  }
+  local rx0, rx1 = 940, W - 56
+  for i, r in ipairs(rows) do
+    local ry = y0 + 16 + (i - 1) * 46
+    text(ass, rx0, ry, 4, BODY, 21, 500, MUTED, r[1])
+    text(ass, rx0 + 190, ry, 4, BODY, 21, 600, FG, shorten(r[2] ~= '' and r[2] or '—', 44))
+    rect(ass, rx0, ry + 24, rx1, ry + 25, 0, FG, 'EB')
+  end
+end
+
 -- Opens a sheet tab with the focus on what's in use (the current track or mode).
 function open_panel(name)
   state.panel, state.zone, state.panel_focus, state.panel_first = name, 'panel', 1, 1
@@ -354,7 +454,7 @@ local function draw_panel(ass)
   if state.panel_focus > #rows then state.panel_focus = #rows end
   if state.panel_focus < 1 then state.panel_focus = 1 end
 
-  local top = H - (has_style and 600 or 500)
+  local top = H - ((has_style or state.panel == 'info') and 600 or 500)
   state.panel_rect = { 0, top, W, H }
   hit('sheet', 0, top, W, H, function() end)   -- empty parts of the sheet do nothing
   rect(ass, 0, 0, W, H, 0, '000000', 'C0')                         -- dim the video
@@ -384,6 +484,9 @@ local function draw_panel(ass)
     end)
     tx = tx + w + 10
   end
+
+  if state.panel == 'info' then draw_info(ass, top + 200) return end
+  send_info_pic(nil)
 
   -- Cards
   local cards = {}
@@ -546,30 +649,6 @@ local function pad_legend(ass)
     text(ass, x, cy, 4, BODY, 19, 600, FG, it[2])
     x = x + #it[2] * 11 + 26
   end
-end
-
-local function info_box(ass)
-  local hw = mp.get_property('hwdec-current') or 'no'
-  local drops = mp.get_property('frame-drop-count') or '0'
-  local dec = mp.get_property('decoder-frame-drop-count') or '0'
-  local cache = tonumber(mp.get_property('demuxer-cache-duration') or '0') or 0
-  local tp = mp.get_property_native('video-target-params') or {}
-  local out = (tp.gamma == 'pq' or tp.gamma == 'hlg') and 'HDR to the screen'
-    or ((((mp.get_property_native('video-params') or {}).gamma == 'pq')
-      or tostring(state.info.quality or ''):find('Dolby') or tostring(state.info.quality or ''):find('HDR'))
-      and 'HDR converted to SDR' or 'SDR')
-  local lines = {
-    'Output  ' .. out .. '  ·  mpv ' .. (mp.get_property('mpv-version') or ''):gsub('^mpv ', ''),
-    'Decoder  ' .. ((hw == '' or hw == 'no') and 'CPU' or ('GPU (' .. hw .. ')')),
-    'Dropped frames  ' .. drops .. ' / ' .. dec,
-    'Buffered  ' .. math.floor(cache) .. 's',
-    'Source  ' .. (state.info.server and 'converted by your server (NAS)' or 'original file, direct play'),
-    'Picture  mpv, full screen' .. ((state.info.step or 0) > 0 and (', eased (step ' .. state.info.step .. ')') or ''),
-  }
-  local x1, y0 = W - 56, state.info.group and 168 or 150
-  local x0, y1 = x1 - 560, y0 + 40 + #lines * 32
-  glass(ass, x0, y0, x1, y1, 14)
-  for i, l in ipairs(lines) do text(ass, x0 + 22, y0 + 20 + (i - 1) * 32, 7, BODY, 19, 500, SOFT, l) end
 end
 
 -- Who's in the room: small initials, top right, under the quality line.
@@ -739,33 +818,68 @@ local function draw_up_next(ass)
   end)
 end
 
--- The loading screen. Frame shows the same one before the player opens (the title logo
--- centred in a 900 x 160 box at y = 500, the line under it at y = 620, a thin running line at
--- y = 680), so going from Frame to the player can't be seen. Frame places the logo itself (a
--- picture, which these controls can't draw) and says so with info.logo; without one, the
--- title is written in its place. When the video starts, the screen fades into it.
+-- The loading screen, like starting a game on PS5: the show's artwork full screen with the
+-- logo bottom left (where Home's hero puts it), the episode line, chips for how it plays, a
+-- running line and where it starts. Frame shows the same screen before the player opens,
+-- so going from Frame to the player can't be seen. The artwork and logo are one picture that
+-- Frame places underneath (info.backdrop / info.logo); without it, a plain dark screen and the
+-- title written out. When the video is ready the screen dips to black and opens on the video
+-- (a picture can't fade, so it's taken off while the screen is black).
 local started = mp.get_time()
+local FADE_OUT, FADE_IN = 0.25, 0.35
 local function draw_loading(ass)
-  local a = 0
-  if state.loading_fade then a = math.min(1, (mp.get_time() - state.loading_fade) / 0.5) end
-  local function alpha(base) -- base see-through (0-255), faded further as the screen goes
-    return string.format('%02X', math.floor(base + (255 - base) * a))
+  local t = state.loading_fade and (mp.get_time() - state.loading_fade) or 0
+  if state.loading_fade and t >= FADE_OUT then
+    -- the video comes up out of black
+    local a = math.min(1, (t - FADE_OUT) / FADE_IN)
+    rect(ass, 0, 0, W, H, 0, '000000', string.format('%02X', math.floor(255 * a)))
+    return
   end
-  rect(ass, 0, 0, W, H, 0, BG, alpha(0))
+  local info = state.info
+  if not info.backdrop then rect(ass, 0, 0, W, H, 0, BG, '00') end
   -- (while Frame is still preparing the logo, briefly nothing, rather than the title flashing)
-  local waiting_logo = state.info.logo_coming and mp.get_time() - started < 2
-  if not state.info.logo and not waiting_logo then
-    text(ass, W / 2, 500, 5, DISPLAY, 64, 700, FG, state.info.title or mp.get_property('media-title') or '', alpha(0))
+  local waiting_logo = info.logo_coming and mp.get_time() - started < 2
+  if not info.logo and not waiting_logo then
+    text(ass, 120, 580, 1, DISPLAY, 84, 700, FG, shorten(info.title or mp.get_property('media-title') or '', 26))
   end
-  local line = state.info.loading_line
-  if line and line ~= '' then text(ass, W / 2, 621, 5, BODY, 26, 500, SOFT, line, alpha(0)) end
-  -- a short accent segment running along a faint track, like Frame's
-  local x0, x1, y = W / 2 - 120, W / 2 + 120, 680
-  rect(ass, x0, y - 2, x1, y + 2, 2, FG, alpha(225))
-  local t = (mp.get_time() % 1.6) / 1.6
-  local s0 = x0 + (x1 - x0) * math.max(0, t * 1.4 - 0.4)
-  local s1 = x0 + (x1 - x0) * math.min(1, t * 1.4)
-  if s1 - s0 > 2 then rect(ass, s0, y - 2, s1, y + 2, 2, accent_colour(), alpha(0)) end
+  local line = info.loading_line
+  if line and line ~= '' then text(ass, 120, 604, 7, BODY, 28, 500, SOFT, line) end
+  -- chips: how it plays
+  local cx = 120
+  for _, chip in ipairs(type(info.loading_chips) == 'table' and info.loading_chips or {}) do
+    local w = 32 + utf8_len(chip) * 10.5
+    rect(ass, cx, 660, cx + w, 700, 20, FG, 'E0')
+    text(ass, cx + w / 2, 680, 5, BODY, 19, 600, FG, chip)
+    cx = cx + w + 10
+  end
+  -- a white segment running along a faint track
+  local x0, x1, y = 120, 540, 744
+  rect(ass, x0, y - 2, x1, y + 2, 2, FG, 'D6')
+  local p = (mp.get_time() % 1.6) / 1.6
+  local s0 = x0 + (x1 - x0) * math.max(0, p * 1.4 - 0.4)
+  local s1 = x0 + (x1 - x0) * math.min(1, p * 1.4)
+  if s1 - s0 > 2 then rect(ass, s0, y - 2, s1, y + 2, 2, FG, '00') end
+  local status = info.loading_status
+  if status and status ~= '' then text(ass, 120, 764, 7, BODY, 21, 500, MUTED, status) end
+  -- time, top right
+  text(ass, W - 56, 64, 6, BODY, 26, 600, SOFT, os.date('%H:%M'))
+  -- Cancel, bottom right (with a controller)
+  if state.pad ~= 'none' then
+    local ps = state.pad == 'ps'
+    local gx, gy = W - 56 - 112, H - 62
+    rect(ass, gx, gy - 17, gx + 34, gy + 17, 17, FG, 'DB')
+    if ps then
+      rect(ass, gx + 9, gy - 8, gx + 25, gy + 8, 8, FG)
+      rect(ass, gx + 12, gy - 5, gx + 22, gy + 5, 5, '1E1A17')
+    else
+      text(ass, gx + 17, gy, 5, BODY, 16, 800, FG, 'B')
+    end
+    text(ass, gx + 44, gy, 4, BODY, 22, 600, SOFT, 'Cancel')
+  end
+  -- dipping to black before the video
+  if state.loading_fade then
+    rect(ass, 0, 0, W, H, 0, '000000', string.format('%02X', math.floor(255 * (1 - t / FADE_OUT))))
+  end
 end
 
 local function render()
@@ -778,6 +892,7 @@ local function render()
     overlay:update()
     return
   end
+  if state.panel ~= 'info' or not state.visible then send_info_pic(nil) end   -- Info's picture off
   if state.visible then
     local pos = mp.get_property_number('time-pos', 0) or 0
     local dur = mp.get_property_number('duration', 0) or 0
@@ -853,8 +968,7 @@ local function render()
       local w = 44 + math.max(#label * 12, utf8_len(value) * 8.5)
       local focused = state.zone == 'buttons' and state.button == i
       if focused then ring(ass, tx, cy - 38, tx + w, cy + 38, 24) end
-      if focused then rect(ass, tx, cy - 38, tx + w, cy + 38, 24, FG, '00')
-      elseif name == 'info' and state.info_box then rect(ass, tx, cy - 38, tx + w, cy + 38, 24, FG, 'E6') end
+      if focused then rect(ass, tx, cy - 38, tx + w, cy + 38, 24, FG, '00') end
       text(ass, tx + 22, cy - 2, 1, BODY, 23, 700, focused and BG or FG, label)
       if value ~= '' then text(ass, tx + 22, cy + 2, 7, BODY, 18, 500, focused and '50423B' or MUTED, value) end
       local idx = i
@@ -882,7 +996,6 @@ local function render()
     end
 
     room_people(ass)
-    if state.info_box then info_box(ass) end
     if state.panel then draw_panel(ass) end
     pad_legend(ass)
   end
@@ -925,7 +1038,6 @@ function activate()
   if b == 'play' then toggle_pause()
   elseif b == 'rew' then seek_by(-10)
   elseif b == 'ff' then seek_by(30)
-  elseif b == 'info' then state.info_box = not state.info_box
   else open_panel(b) end
   show()
 end
@@ -953,7 +1065,7 @@ local function key(k)
     elseif k == 'right' or k == 'ff' then seek_by(30)
     elseif k == 'back' then show(true) return   -- one Back shows the controls; a second one leaves
     elseif k == 'playpause' then toggle_pause()
-    elseif k == 'info' then state.info_box = not state.info_box end
+    elseif k == 'info' then open_panel('info') end
     show(true)
     return
   end
@@ -969,7 +1081,11 @@ local function key(k)
   end
   if k == 'rew' then seek_by(-10) show() return end
   if k == 'ff' then seek_by(30) show() return end
-  if k == 'info' then state.info_box = not state.info_box show() return end
+  if k == 'info' then
+    if state.panel == 'info' then state.panel, state.zone = nil, 'buttons' else open_panel('info') end
+    show()
+    return
+  end
 
   if state.zone == 'panel' then
     local rows = panel_rows()
@@ -1193,8 +1309,9 @@ local function finish_loading()
   if not state.loading then return end
   state.loading, state.loading_fade = false, mp.get_time()
   state.logo_gone = true
-  request('loaded', true) -- Frame takes its logo off (a picture can't fade with the rest)
-  mp.add_timeout(0.5, function()
+  -- once the screen is black, Frame takes its picture off (a picture can't fade)
+  mp.add_timeout(FADE_OUT, function() request('loaded', true) end)
+  mp.add_timeout(FADE_OUT + FADE_IN, function()
     state.loading_fade = nil
     loading_timer:kill()
     state.zone, state.button = 'buttons', PLAY
@@ -1208,7 +1325,7 @@ mp.register_event('start-file', function()
   if state.loading_fade then return end
   if mp.get_property_native('playlist-pos', 0) > 0 or state.logo_gone then
     state.loading, state.visible, state.panel = true, false, nil
-    state.info.logo, state.info.logo_coming = false, false -- the logo was for the first video
+    state.info.logo, state.info.logo_coming, state.info.backdrop = false, false, false -- for the first video only
     loading_timer:resume()
   end
 end)

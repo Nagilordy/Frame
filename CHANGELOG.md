@@ -51,6 +51,28 @@ What changed in each version of Frame. Newest first.
   buttons above the grid: one "Sort & filter" button now, lit up while a filter is on.
 - **Error screen in the new style:** a centred card over the faded artwork of what you tried to
   play, with Retry (when the server was out of reach) and Back.
+- **On-screen keyboard in the new style:** a full-width sheet from the bottom (like the player's
+  panel and the PS5 keyboard), the field you're typing in at the top as a pill with the white
+  ring, bigger rounded keys, the selected key white with the ring, and Done always lit.
+- **Fix (#3):** a selected text field no longer turns solid white and hides what you type; its
+  fill is solid now, so the ring stays a ring.
+- **Watch party: Join a party and Start a watch party in the new style.** Both use the party
+  menu's tall card on the right.
+  - Join a party (from the rooms pill on Home): one card per party with whose it is, what's on,
+    who's in it and whether it's playing or paused; "Start my own party" at the bottom.
+  - Start a watch party (profile menu): says what a party does in three steps, shows any party
+    already going so you can join it instead, then Start the party / Not now. Before, the tile
+    started a party straight away.
+- **Info is now a tab of the player sheet** (Triangle, or Info on the bar), next to Audio,
+  Subtitles and Playback. Left: the episode's picture, title, season / episode / year / length,
+  when it ends and its summary. Right: video, audio, subtitles, how it's playing (original file
+  or converted), decoder, buffered and dropped frames, and your screen. Replaces the small box.
+- **Log fix:** "mpv: closed while starting" no longer appears every time you quit the player
+  normally; it now only shows when mpv really closed before Frame could connect.
+- **New loading screen, like starting a game on PS5:** the show's artwork full screen, the logo
+  bottom left where Home shows it, the episode line, chips for the quality (4K, HDR, 5.1...), a
+  running line and "Resumes at 14:55" / "Starting". Frame and the player show the same screen,
+  and when the video is ready it dips to black and opens on the video.
 - **Up next card in the new style:** a rounded card at the bottom right with the next episode's
   picture, title, season / episode and length. The white Play now pill fills up during the
   10-second countdown; "Watch the credits" (Circle) hides it and lets the episode play out.

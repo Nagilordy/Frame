@@ -91,7 +91,9 @@ class _TvTextFieldState extends State<TvTextField> {
         builder: (f) => AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           decoration: BoxDecoration(
-            color: kFg.withOpacity(f || _editing ? 0.10 : 0.06),
+            // Solid (the pill's tint over the card colour): with a see-through fill, the white
+            // ring drawn behind it showed through and the field turned solid white (#3).
+            color: Color.alphaBlend(kFg.withOpacity(f || _editing ? 0.10 : 0.06), const Color(0xFF12151B)),
             borderRadius: BorderRadius.circular(999),
             boxShadow: f || _editing
                 ? const [BoxShadow(color: Color(0xFF12151B), spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 8)]
@@ -148,7 +150,7 @@ Future<bool> showTvKeyboard(BuildContext context,
     transitionBuilder: (_, a, __, child) => FadeTransition(
       opacity: CurvedAnimation(parent: a, curve: Curves.easeOut),
       child: SlideTransition(
-        position: Tween(begin: const Offset(0, 0.04), end: Offset.zero)
+        position: Tween(begin: const Offset(0, 0.12), end: Offset.zero)
             .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
         child: child,
       ),
@@ -341,58 +343,78 @@ class _KeyboardState extends State<_Keyboard> {
         onKeyEvent: _onKey,
         child: TvCanvas(
           child: Stack(children: [
+            // A sheet from the bottom, full width, like the player's panel and the PS5 keyboard.
             Positioned(
               left: 0,
               right: 0,
-              bottom: 110,
-              child: Center(
-                child: Material(
-                  type: MaterialType.transparency,
-                  // The same solid surface as every menu and panel in Frame.
-                  child: Surface(
-                    width: 10 * _unit + 2 * 36,
-                    padding: const EdgeInsets.fromLTRB(36, 30, 36, 36),
-                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      // What you're typing, with the field's name.
-                      Text(widget.label, style: tvBody(19, color: kMuted)),
-                      const SizedBox(height: 10),
-                      Container(
-                        height: 70,
-                        padding: const EdgeInsets.symmetric(horizontal: 22),
-                        decoration: BoxDecoration(
-                          color: kBg.withOpacity(0.6),
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        child: Row(children: [
-                          Expanded(
-                            child: Text.rich(
-                              TextSpan(children: [
-                                TextSpan(text: shown, style: tvBody(30)),
-                                TextSpan(text: '|', style: tvBody(30, weight: FontWeight.w400, color: kMuted)),
-                              ]),
-                              maxLines: 1,
-                              overflow: TextOverflow.fade,
-                              softWrap: false,
-                            ),
-                          ),
-                          if (widget.obscure)
-                            GestureDetector(
-                              onTap: () => setState(() => _reveal = !_reveal),
-                              child: Icon(_reveal ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                                  size: 28, color: kMuted),
-                            ),
-                        ]),
-                      ),
-                      const SizedBox(height: 22),
-                      for (var r = 0; r < rows.length; r++)
+              bottom: 0,
+              height: 690,
+              child: Material(
+                type: MaterialType.transparency,
+                child: Container(
+                  padding: const EdgeInsets.only(top: 40),
+                  decoration: BoxDecoration(
+                    color: const Color(0xF712151B),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
+                    border: Border(top: BorderSide(color: kFg.withOpacity(0.08))),
+                  ),
+                  child: Column(children: [
+                    // What you're typing, with the field's name: the same pill as the field,
+                    // with the ring (it's where the letters go).
+                    SizedBox(
+                      width: 10 * _unit - _gap,
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Padding(
-                          padding: EdgeInsets.only(bottom: r == rows.length - 1 ? 0 : _gap),
+                          padding: const EdgeInsets.only(left: 8),
+                          child: Text(widget.label, style: tvBody(21, weight: FontWeight.w600, color: kMuted)),
+                        ),
+                        const SizedBox(height: 10),
+                        Container(
+                          height: 76,
+                          padding: const EdgeInsets.symmetric(horizontal: 30),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF22262D),
+                            borderRadius: BorderRadius.circular(999),
+                            boxShadow: const [
+                              BoxShadow(color: Color(0xFF12151B), spreadRadius: 4),
+                              BoxShadow(color: kFg, spreadRadius: 8),
+                            ],
+                          ),
                           child: Row(children: [
-                            for (var c = 0; c < rows[r].length; c++) _keyView(rows[r][c], r, c),
+                            Expanded(
+                              child: Text.rich(
+                                TextSpan(children: [
+                                  TextSpan(text: shown, style: tvBody(30)),
+                                  TextSpan(text: '|', style: tvBody(30, weight: FontWeight.w400, color: kMuted)),
+                                ]),
+                                maxLines: 1,
+                                overflow: TextOverflow.fade,
+                                softWrap: false,
+                              ),
+                            ),
+                            if (widget.obscure)
+                              GestureDetector(
+                                onTap: () => setState(() => _reveal = !_reveal),
+                                child: Row(children: [
+                                  Icon(_reveal ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                                      size: 26, color: kMuted),
+                                  const SizedBox(width: 8),
+                                  Text(_reveal ? 'Hide' : 'Show', style: tvBody(19, color: kMuted)),
+                                ]),
+                              ),
                           ]),
                         ),
-                    ]),
-                  ),
+                      ]),
+                    ),
+                    const SizedBox(height: 34),
+                    for (var r = 0; r < rows.length; r++)
+                      Padding(
+                        padding: EdgeInsets.only(bottom: r == rows.length - 1 ? 0 : _gap),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          for (var c = 0; c < rows[r].length; c++) _keyView(rows[r][c], r, c),
+                        ]),
+                      ),
+                  ]),
                 ),
               ),
             ),
@@ -406,8 +428,13 @@ class _KeyboardState extends State<_Keyboard> {
     final focused = r == _row && c == _col;
     final special = k.kind != _K.char;
     final on = (k.kind == _K.shift && _shift);
-    final fill = focused ? kFg : (on ? kFg.withOpacity(0.30) : kFg.withOpacity(special ? 0.14 : 0.08));
-    final color = focused ? kBg : kFg;
+    final done = k.kind == _K.done;
+    final fill = focused
+        ? kFg
+        : done
+            ? kFg.withOpacity(0.82) // always lit, easy to find
+            : (on ? kFg.withOpacity(0.30) : kFg.withOpacity(special ? 0.14 : 0.08));
+    final color = focused || done ? kBg : kFg;
     Widget label;
     switch (k.kind) {
       case _K.shift:
@@ -438,7 +465,14 @@ class _KeyboardState extends State<_Keyboard> {
           height: 72,
           margin: const EdgeInsets.only(right: _gap),
           alignment: Alignment.center,
-          decoration: BoxDecoration(color: fill, borderRadius: BorderRadius.circular(14)),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: BorderRadius.circular(22),
+            // the white ring, kept inside the 10 px gap so the next key doesn't cover it
+            boxShadow: focused
+                ? const [BoxShadow(color: Color(0xFF12151B), spreadRadius: 3), BoxShadow(color: kFg, spreadRadius: 7)]
+                : const [],
+          ),
           child: label,
         ),
       ),

@@ -20,7 +20,7 @@ import 'home.dart' show HomeScreen;
 import 'images.dart' show netImage;
 import 'keyboard.dart' show TvTextField;
 import 'main.dart' show Jellyfin;
-import 'syncplay.dart' show SyncPlay, startParty, showPartyMenu;
+import 'syncplay.dart' show SyncPlay, showPartyMenu, showStartParty;
 import 'ui.dart';
 
 // ---------- What Frame remembers ----------
@@ -1416,7 +1416,7 @@ class _ProfileMenuState extends State<_ProfileMenu> {
     if (SyncPlay.of(jf).inParty) {
       showPartyMenu(ctx, jf);
     } else {
-      startParty(ctx, jf);
+      showStartParty(ctx, jf);
     }
   }
 
