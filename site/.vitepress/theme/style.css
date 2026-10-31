@@ -1,0 +1,26 @@
+/* Graphite: neutral black-grey, a soft white light, orange only where it matters. */
+:root, .dark {
+  --vp-c-bg: #0d0e10;
+  --vp-c-bg-alt: #0d0e10;
+  --vp-c-bg-soft: #16181c;
+  --vp-c-bg-elv: #16181c;
+  --vp-c-divider: rgba(244, 245, 247, 0.08);
+  --vp-c-gutter: rgba(244, 245, 247, 0.06);
+  --vp-c-text-1: #f4f5f7;
+  --vp-c-text-2: #d3d8e0;
+  --vp-c-text-3: #8e97a6;
+  --vp-c-brand-1: #e4a15a;
+  --vp-c-brand-2: #eab275;
+  --vp-c-brand-3: #e4a15a;
+  --vp-c-brand-soft: rgba(228, 161, 90, 0.14);
+  --vp-button-brand-bg: #e4a15a;
+  --vp-button-brand-text: #0d0e10;
+  --vp-button-brand-hover-bg: #eab275;
+  --vp-button-brand-hover-text: #0d0e10;
+  --vp-font-family-base: 'Hanken Grotesk', system-ui, sans-serif;
+  --vp-nav-bg-color: #0d0e10;
+  --vp-sidebar-bg-color: #0d0e10;
+  --vp-local-search-bg: #16181c;
+}
+h1, h2, h3, .VPNavBarTitle .title { font-family: 'Sora', 'Hanken Grotesk', sans-serif; }
+.vp-doc img { border-radius: 12px; }
