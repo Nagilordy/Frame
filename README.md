@@ -1,28 +1,65 @@
 # Frame
 
-A couch-first app for watching your **Jellyfin** library, with a controller, a mouse or a keyboard.
-Frame talks to your existing Jellyfin server and plays the original files directly, in the best
-quality your screen can show, including real HDR and Dolby Vision on Linux.
+### Your Jellyfin library, the way a console would show it.
 
-> **Status:** early test builds (pre-release). Expect rough edges.
+Frame is a couch-first app for **Jellyfin**: full-screen artwork, big readable menus, made for a
+**controller** but just as good with a mouse and keyboard. It plays your original files straight
+from your server, in the best quality your screen can show, **4K, HDR and Dolby Vision included**.
+Watch together with friends in sync, pick up where you left off, and never fight a tiny menu from
+the couch again.
+
+![Frame's Home screen: full-screen artwork, the show's logo, Resume and Watch together, Continue watching below](docs/screenshots/home.jpg)
+
+> **Status:** 0.3 is in testing on Linux and Windows. Try a build from [Releases](../../releases)
+> and tell us what breaks: [report a bug](../../issues/new?template=bug_report.yml) or
+> [suggest an idea](../../issues/new?template=feature_request.yml). Progress toward 0.3:
+> [milestone](../../milestone/1).
+
+## A quick look
+
+| | |
+|---|---|
+| ![A library grid of anime posters, one selected with a white ring](docs/screenshots/library.jpg) | ![Sort & filter: a sheet from the bottom with Sort by, Show and Genre](docs/screenshots/sort-filter.jpg) |
+| **Libraries** with big posters, made to browse with a controller | **Sort & filter** in one sheet: sort, unwatched only, 4K only, genres |
+| ![The player: a see-through bar with Audio, Subtitles, Playback and Info, and -10 / play / +30](docs/screenshots/player.jpg) | ![Watch together: a card explaining watch parties, with Start the party](docs/screenshots/watch-party.jpg) |
+| **The player** shows what's playing at a glance: audio, subtitles, quality | **Watch parties**: anything you play opens for everyone, in sync |
+
+## Why Frame
+
+- **It feels like a console, not a website.** Full-screen artwork, a white ring on whatever's
+  selected, menus that slide up from the bottom like on a PS5. Everything is readable from across
+  the room.
+- **Made for controllers.** PlayStation, Xbox and Steam controllers work out of the box, with a
+  button guide that matches the one in your hands. Mouse and keyboard work everywhere too.
+- **Best-quality playback.** Plays the original file directly (4K, HDR, Dolby Vision, TrueHD /
+  Atmos, DTS; SRT, ASS and PGS subtitles) and quietly switches to your server's converted version only
+  when a device can't keep up.
+- **Seamless from Play to picture.** The loading screen looks like starting a game: artwork, logo,
+  where you'll resume. Then it opens straight onto the video.
+- **Watch together.** Start a party and friends get an invite on their Home. Pause, skip or go
+  back and it happens for everyone. The party stays together from one episode to the next.
+- **It remembers you.** Your audio and subtitle choices per show, where you stopped, which episode
+  is next, synced with Jellyfin so every other app agrees.
+- **Your server, your library.** Frame is just a better way to watch what you already have:
+  nothing to migrate, works with your existing Jellyfin users, and you can keep using the official
+  apps alongside.
 
 ## Features
 
-- **Console-style home screen.** Full-screen artwork, Continue watching, Recently added, and one tab
-  per library (Movies, Shows, Anime…).
+- **Console-style Home.** Continue watching (with your next episode ready), Recently added, and one
+  tab per library (Movies, Shows, Anime…).
 - **Who's watching.** Profiles like a console, with Quick Connect sign-in (approve a code from your
-  phone, nothing to type) or a password, and an on-screen keyboard for the controller.
-- **Best-quality playback.**
-  - Plays the original file straight from your server.
-  - On Linux, plays in mpv with real HDR and Dolby Vision.
-  - Switches to the server's converted version automatically if a device can't keep up.
+  phone, nothing to type) or a password with an on-screen keyboard.
+- **Show pages.** Seasons and episodes; the selected episode's full summary shows above the row.
+- **The player.**
+  - A see-through bar with Audio, Subtitles, Playback and Info, each showing what's in use.
+  - Big track cards, subtitle size / position / background, and an Info tab with the episode
+    and every technical detail (codec, HDR, decoder, buffering, dropped frames).
+  - **Up next** card at the credits: the next episode starts after a short countdown, across
+    seasons.
 - **Remembers your audio and subtitles** per show, like Infuse (language, forced, SDH).
-- **Watch parties.** Start a party (Triangle on Home), and anything anyone plays opens for everyone,
-  in sync. Everyone can play, pause and skip, and keeps their own subtitles and audio. The party
-  stays together between videos until you leave it. Friends get an invite on their Home.
-- **Up next.** Episodes roll into the next one, across seasons.
-- **Made for controllers.** PlayStation, Xbox and Steam controllers work out of the box, with a
-  button legend that matches your controller.
+- **Watch parties** with invites, a party menu showing who's in and what they're watching, and
+  Frame-to-Frame sync that keeps everyone together.
 - **Several servers.** Your own and a friend's, each staying signed in.
 
 ## Download
@@ -52,10 +89,10 @@ Vision. Nothing else to install.
 |---|---|
 | Cross / A | Select |
 | Circle / B | Back. On Home and in libraries, goes back to the top first |
-| Triangle / Y | Profile menu on Home · playback info in the player · Join from an invite |
+| Triangle / Y | Profile menu on Home · Info in the player · Join from an invite |
 | Square / X | Delete a letter on the keyboard |
 | L2 / R2 (LT / RT) | Previous / next tab (Home, libraries; seasons on a show page) |
-| L1 / R1 (LB / RB) | Skip back 10 s / forward 30 s in the player |
+| L1 / R1 (LB / RB) | Skip back 10 s / forward 30 s in the player · switch tabs in the player's sheet |
 | Options / Menu | Play / pause |
 | Create / View | Full screen on or off |
 
@@ -74,6 +111,13 @@ flutter run -d linux --release      # or: -d windows
 Linux builds need the usual Flutter desktop packages plus `libmpv`. The GitHub Actions workflows
 in `.github/workflows` build the Windows installer and the Linux AppImage. Pushing a tag like
 `v0.3` attaches both to a release.
+
+## Help test Frame
+
+Found a problem? Use the [bug report form](../../issues/new?template=bug_report.yml); it asks for
+everything needed to fix it (system, controller, screen, logs). Ideas go in the
+[feature request form](../../issues/new?template=feature_request.yml). Give a 👍 to existing ideas
+you want too: it's how we pick what comes next.
 
 ## Logs
 
