@@ -1,0 +1,139 @@
+name: Bug report
+description: Something in Frame doesn't work or looks wrong
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Frame! The more of this you fill in, the faster it gets fixed.
+        One problem per report, please. Check the [open issues](https://github.com/Nagilordy/Frame/issues) first in case it's already known.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the problem in a sentence or two.
+      placeholder: "Example: on Switch server, the keyboard opens but the controller still moves the screen behind it."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen
+      description: What did you do, step by step, so we can see it too?
+      placeholder: |
+        1. Open the profile menu (Triangle)
+        2. Choose Switch server
+        3. Select the address field and press Cross
+        4. Press the D-pad
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+      placeholder: "Example: the D-pad moves between the keys."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where in Frame?
+      options:
+        - Home
+        - Library (Movies, Shows, Anime…)
+        - Show or movie page
+        - Player (playback, controls, subtitles, audio)
+        - Loading screen / starting a video
+        - Watch party
+        - Profiles / sign in / switch server
+        - On-screen keyboard
+        - Installing / starting Frame
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-often
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Only once so far
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Frame version
+      description: The release you downloaded (e.g. v0.3.1), or "built from source" with the date.
+      placeholder: "v0.3.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Computer
+      options:
+        - Linux (AppImage)
+        - Linux (built from source)
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Which Linux / Windows exactly?
+      placeholder: "Bazzite 43, Ubuntu 24.04, Windows 11…"
+
+  - type: dropdown
+    id: input
+    attributes:
+      label: What were you using to control Frame?
+      multiple: true
+      options:
+        - PlayStation controller (DualSense / DualShock)
+        - Xbox controller
+        - Steam Controller / Steam Deck
+        - Other controller
+        - Mouse
+        - Keyboard
+    validations:
+      required: true
+
+  - type: input
+    id: screen
+    attributes:
+      label: Screen
+      description: Resolution, and whether Frame was full screen.
+      placeholder: "4K TV, full screen / 1440p monitor, window"
+
+  - type: input
+    id: video
+    attributes:
+      label: The video (if it's about playback)
+      description: What it was and its quality, as shown in Frame's Info (Triangle in the player).
+      placeholder: "The Simpsons S17E19 · 1080p · HEVC · AC3 5.1 · original file"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log
+      description: |
+        Very helpful for crashes and playback problems. On Linux, start Frame from a terminal and copy what it prints around the problem.
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or video
+      description: Drag images or a short clip here.
