@@ -1103,8 +1103,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     perfLog('mpv could not open ${_server ? 'the server version' : 'the original'} (${why ?? 'unknown error'})');
     _ended = true;
     if (mounted) {
-      setState(() => _error = "This video couldn't be played${why != null ? ' ($why)' : ''}. "
-          "The server couldn't provide a playable version either.");
+      setState(() => _error = "The file wouldn't open${why != null ? ' ($why)' : ''}, "
+          "and the server couldn't provide a playable version either.");
     }
     unawaited(_mpv.close());
   }
@@ -1687,7 +1687,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   Widget build(BuildContext context) {
     return PadHints(
       // The legend is drawn inside mpv; only the error screen here needs one.
-      hints: _error != null ? const [PadHint(PadButton.back, 'Back')] : const [],
+      hints: _error != null ? const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Back')] : const [],
       child: Focus(
         focusNode: _focus,
         autofocus: true,
@@ -1767,28 +1767,76 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     );
   }
 
-  Widget _errorView() => Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1100),
-            child: Text(_error!, textAlign: TextAlign.center, style: tvBody(26, color: kMuted)),
-          ),
-          const SizedBox(height: 24),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            if (_unreachable) ...[
-              Focusable(
-                autofocus: true,
-                onSelect: _retry,
-                builder: (f) => tvPill('Retry', focused: f, icon: Icons.refresh_rounded),
-              ),
-              const SizedBox(width: 16),
-            ],
-            Focusable(
-              autofocus: !_unreachable,
-              onSelect: () => Navigator.of(context).maybePop(),
-              builder: (f) => tvPill('Back', focused: f, icon: Icons.arrow_back_rounded),
+  // Something went wrong: a centred card (like the other new menus) over the faded artwork of
+  // what you tried to play, so you know what failed. Retry when the server was out of reach.
+  Widget _errorView() {
+    final title = _unreachable ? "Can't reach your Jellyfin server" : "This video couldn't be played";
+    final what = [titleOf(_item), episodeLine(_item)].where((x) => x.isNotEmpty).join(' · ');
+    final body = _unreachable
+        ? 'Check that the NAS is on and connected, then try again.${what.isEmpty ? '' : ' $what will start where you left off.'}'
+        : _error!;
+    Widget pill(String label, IconData icon, VoidCallback onSelect, {bool autofocus = false}) => Focusable(
+          autofocus: autofocus,
+          onSelect: onSelect,
+          builder: (f) => AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            height: 68,
+            padding: const EdgeInsets.fromLTRB(26, 0, 34, 0),
+            decoration: BoxDecoration(
+              color: f ? kFg : kFg.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(999),
+              boxShadow: f
+                  ? const [BoxShadow(color: Color(0xFF12151B), spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)]
+                  : const [],
             ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(icon, size: 28, color: f ? kBg : kFg),
+              const SizedBox(width: 12),
+              Text(label, style: tvBody(26, weight: f ? FontWeight.w700 : FontWeight.w600, color: f ? kBg : kFg)),
+            ]),
+          ),
+        );
+    final art = sizeBucket(tvPx(1920)).clamp(1280, 2560);
+    return Stack(children: [
+      Positioned.fill(
+        child: netImage(widget.jf.backdropFor(_item, maxWidth: art),
+            cacheWidth: art, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+      ),
+      Positioned.fill(child: ColoredBox(color: kBg.withOpacity(0.78))),
+      Center(
+        child: Container(
+          width: 860,
+          padding: const EdgeInsets.all(56),
+          decoration: BoxDecoration(
+            color: const Color(0xF712151B),
+            borderRadius: BorderRadius.circular(36),
+            border: Border.all(color: kFg.withOpacity(0.08)),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 96,
+              height: 96,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: kFg.withOpacity(0.08)),
+              child: Icon(_unreachable ? Icons.cloud_off_rounded : Icons.error_outline_rounded, size: 48, color: kFg),
+            ),
+            const SizedBox(height: 26),
+            Text(title, textAlign: TextAlign.center, style: tvDisplay(44)),
+            const SizedBox(height: 18),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 660),
+              child: Text(body, textAlign: TextAlign.center, style: tvBody(26, color: kSoft, height: 1.45)),
+            ),
+            const SizedBox(height: 36),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              if (_unreachable) ...[
+                pill('Retry', Icons.refresh_rounded, _retry, autofocus: true),
+                const SizedBox(width: 16),
+              ],
+              pill('Back', Icons.arrow_back_rounded, () => Navigator.of(context).maybePop(), autofocus: !_unreachable),
+            ]),
           ]),
-        ]),
-      );
+        ),
+      ),
+    ]);
+  }
 }

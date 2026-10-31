@@ -231,7 +231,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   // ---------- Pickers (sort and genre) ----------
 
   Future<void> _openPicker(_Picker picker) async {
-    if (picker == _Picker.genre && _genres == null) {
+    if (_genres == null) { // the sheet always shows the Genre column
       try {
         _genres = await jf.genres(_libId);
       } catch (_) {
@@ -376,36 +376,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
       FocusLinks(
         down: _focusGrid,
         child: FocusTraversalGroup(
+        // One button: everything (sort, unwatched, 4K, genre) is in the sheet it opens. Lit up
+        // while a filter is on; the line under the library's name says which.
         child: Wrap(spacing: 12, children: [
           Focusable(
             focusNode: _sortChip,
             onFocus: (_) => _lastChip = _sortChip,
             onSelect: () => _openPicker(_Picker.sort),
-            builder: (f) => tvPill(_sort.label, focused: f, icon: Icons.swap_vert_rounded),
-          ),
-          Focusable(
-            focusNode: _unwatchedChip,
-            onFocus: (_) => _lastChip = _unwatchedChip,
-            onSelect: () {
-              setState(() => _unwatched = !_unwatched);
-              _reload();
-            },
-            builder: (f) => tvPill('Unwatched', focused: f, on: _unwatched),
-          ),
-          Focusable(
-            focusNode: _fourKChip,
-            onFocus: (_) => _lastChip = _fourKChip,
-            onSelect: () {
-              setState(() => _only4k = !_only4k);
-              _reload();
-            },
-            builder: (f) => tvPill('4K', focused: f, on: _only4k),
-          ),
-          Focusable(
-            focusNode: _genreChip,
-            onFocus: (_) => _lastChip = _genreChip,
-            onSelect: () => _openPicker(_Picker.genre),
-            builder: (f) => tvPill(_genre ?? 'Genre', focused: f, on: _genre != null, icon: Icons.expand_more_rounded),
+            builder: (f) => tvPill('Sort & filter',
+                focused: f, on: _unwatched || _only4k || _genre != null, icon: Icons.tune_rounded),
           ),
         ]),
         ),
@@ -604,56 +583,187 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  // ---------- Sort & filter sheet ----------
+  //
+  // Slides up from the bottom (like the profile menu), with everything in three columns:
+  // Sort by, Show (Unwatched, 4K) and Genre. Each choice applies straight away and the sheet
+  // stays open, so they combine; Circle closes it. It opens on the column of the button that
+  // opened it.
+
+  static const _sheet = Color(0xFF12151B);
+
+  // One choice: a pill, white with a ring when selected; the current one is lighter and ticked.
+  Widget _choice(String label, bool on, VoidCallback onSelect, {FocusNode? node, double height = 64}) => Focusable(
+        focusNode: node,
+        scrollAlignment: 0.3,
+        onSelect: () {
+          onSelect();
+          _reload();
+        },
+        builder: (f) => AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          height: height,
+          padding: const EdgeInsets.symmetric(horizontal: 26),
+          decoration: BoxDecoration(
+            color: f ? kFg : kFg.withOpacity(on ? 0.18 : 0.08),
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: f ? const [BoxShadow(color: _sheet, spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)] : const [],
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Flexible(
+              child: Text(label,
+                  overflow: TextOverflow.ellipsis,
+                  style: tvBody(height > 60 ? 24 : 22, weight: f || on ? FontWeight.w700 : FontWeight.w600, color: f ? kBg : kFg)),
+            ),
+            if (on) ...[
+              const SizedBox(width: 12),
+              Icon(Icons.check_rounded, size: 28, color: f ? kBg : kFg),
+            ],
+          ]),
+        ),
+      );
+
+  // A switch row: label, then a small switch in the profile's colour.
+  Widget _toggle(String label, bool on, VoidCallback onSelect, {FocusNode? node}) => Focusable(
+        focusNode: node,
+        onSelect: () {
+          onSelect();
+          _reload();
+        },
+        builder: (f) => AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          height: 64,
+          padding: const EdgeInsets.fromLTRB(26, 0, 14, 0),
+          decoration: BoxDecoration(
+            color: f ? kFg : kFg.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: f ? const [BoxShadow(color: _sheet, spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)] : const [],
+          ),
+          child: Row(children: [
+            Expanded(
+              child: Text(label, style: tvBody(24, weight: FontWeight.w600, color: f ? kBg : kFg)),
+            ),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              width: 64,
+              height: 36,
+              padding: const EdgeInsets.all(4),
+              alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+              decoration: BoxDecoration(
+                color: on ? kAccent : (f ? kBg.withOpacity(0.25) : kFg.withOpacity(0.22)),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(shape: BoxShape.circle, color: f && !on ? kBg : kFg),
+              ),
+            ),
+          ]),
+        ),
+      );
+
+  Widget _columnTitle(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Text(text.toUpperCase(), style: tvBody(20, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1.6)),
+      );
+
   Widget _pickerPanel() {
     final isSort = _picker == _Picker.sort;
-    final options = <(String, bool, VoidCallback)>[
-      if (isSort)
-        for (final s in _sorts)
-          (s.label, s.label == _sort.label, () => setState(() => _sort = s))
-      else ...[
-        ('All genres', _genre == null, () => setState(() => _genre = null)),
-        for (final g in _genres ?? <String>[]) (g, g == _genre, () => setState(() => _genre = g)),
-      ],
+    final genres = _genres ?? const <String>[];
+    final filters = [
+      if (_unwatched) 'unwatched',
+      if (_only4k) '4K',
+      if (_genre != null) _genre!,
     ];
-
     return Positioned.fill(
       child: Stack(children: [
+        // The library behind, dimmed; a click there closes the sheet.
         Positioned.fill(
-          child: GestureDetector(onTap: _closePicker, child: Container(color: Colors.black.withOpacity(0.2))),
+          child: GestureDetector(onTap: _closePicker, child: Container(color: kBg.withOpacity(0.5))),
         ),
-        // A floating glass card, like the player's panels.
         Positioned(
-          top: 40,
-          bottom: 40,
-          right: 40,
-          width: 460,
-          child: Frost(
-            radius: 28,
-            padding: const EdgeInsets.fromLTRB(24, 36, 24, 20),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(isSort ? 'Sort by' : 'Genre', style: tvDisplay(30)),
-              const SizedBox(height: 24),
-              Expanded(
-                child: FocusScope(
-                  child: ListView(children: [
-                    for (var i = 0; i < options.length; i++)
-                      Focusable(
-                        focusNode: i == 0 ? _pickerFirst : null,
-                        scrollAlignment: 0.3,
-                        onSelect: () {
-                          options[i].$3();
-                          _closePicker();
-                          _reload();
-                        },
-                        builder: (f) => Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: surfaceRow(options[i].$1, focused: f, selected: options[i].$2, height: 58),
-                        ),
-                      ),
-                  ]),
-                ),
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 560,
+          child: TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: const Duration(milliseconds: 260),
+            curve: Curves.easeOutCubic,
+            builder: (_, t, child) => Opacity(
+              opacity: t.clamp(0.0, 1.0),
+              child: Transform.translate(offset: Offset(0, 100 * (1 - t)), child: child),
+            ),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(120, 40, 120, 0),
+              decoration: BoxDecoration(
+                color: _sheet.withOpacity(0.97),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
+                border: Border(top: BorderSide(color: kFg.withOpacity(0.08))),
               ),
-            ]),
+              child: Material(
+                type: MaterialType.transparency,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+                    Text(widget.library['Name']?.toString() ?? 'Library', style: tvDisplay(40)),
+                    const SizedBox(width: 20),
+                    Text(
+                        '$_total ${_total == 1 ? 'title' : 'titles'}${filters.isEmpty ? '' : ' · ${filters.join(', ')}'}',
+                        style: tvBody(22, color: kMuted)),
+                  ]),
+                  const SizedBox(height: 30),
+                  Expanded(
+                    child: FocusScope(
+                      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        // Sort by
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                            _columnTitle('Sort by'),
+                            for (final srt in _sorts)
+                              Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: _choice(srt.label, srt.label == _sort.label, () => setState(() => _sort = srt),
+                                    node: isSort && srt.label == _sort.label ? _pickerFirst : null),
+                              ),
+                          ]),
+                        ),
+                        const SizedBox(width: 60),
+                        // Show
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                            _columnTitle('Show'),
+                            _toggle('Unwatched only', _unwatched, () => setState(() => _unwatched = !_unwatched)),
+                            const SizedBox(height: 12),
+                            _toggle('4K only', _only4k, () => setState(() => _only4k = !_only4k)),
+                          ]),
+                        ),
+                        const SizedBox(width: 60),
+                        // Genre
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            _columnTitle('Genre'),
+                            Expanded(
+                              child: SingleChildScrollView(
+                                clipBehavior: Clip.none,
+                                padding: const EdgeInsets.only(bottom: 40),
+                                child: Wrap(spacing: 12, runSpacing: 12, children: [
+                                  _choice('All', _genre == null, () => setState(() => _genre = null),
+                                      node: !isSort && _genre == null ? _pickerFirst : null, height: 56),
+                                  for (final g in genres)
+                                    _choice(g, g == _genre, () => setState(() => _genre = g),
+                                        node: !isSort && g == _genre ? _pickerFirst : null, height: 56),
+                                ]),
+                              ),
+                            ),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                  ),
+                ]),
+              ),
+            ),
           ),
         ),
       ]),

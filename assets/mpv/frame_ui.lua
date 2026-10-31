@@ -30,7 +30,7 @@ local state = {
   loading = true,        -- the loading screen, until the video starts (see below)
   loading_fade = nil,    -- when the fade into the video began
   zone = 'buttons',      -- back | bar | buttons | panel
-  button = 2,            -- which bottom button has focus
+  button = 6,            -- which bottom button has focus (6 = play)
   panel = nil,           -- nil | 'playback' | 'audio' | 'subtitles'
   panel_focus = 1,
   info_box = false,
@@ -205,7 +205,7 @@ local function panel_rows()
     local mode = state.info.mode or 'auto'
     table.insert(rows, { 'Automatic', mode == 'auto', function() request('mode', 'auto') end })
     table.insert(rows, { 'Original file · best quality', mode == 'original', function() request('mode', 'original') end })
-    table.insert(rows, { 'Converted by the server · smoothest', mode == 'server', function() request('mode', 'server') end })
+    table.insert(rows, { 'Server version · converted, smoothest', mode == 'server', function() request('mode', 'server') end })
   elseif state.panel == 'audio' then
     if state.info.server and state.info.server_audio then
       for _, a in ipairs(state.info.server_audio) do
@@ -247,18 +247,20 @@ local function panel_rows()
         end })
       end
     end
-    -- Style, remembered by Frame for every video.
+    -- Style, remembered by Frame for every video: small choices in a row under the tracks.
     local scale, pos, box = sub_style()
-    table.insert(rows, { 'Size  ' .. math.floor(scale * 100 + 0.5) .. '%', false, nil, function(dir)
-      request('style', { scale = math.max(0.5, math.min(2.0, scale + dir * 0.1)), pos = pos, box = box })
-    end, header = 'Style' })
-    local above = math.floor((100 - pos) / 5 + 0.5)
-    table.insert(rows, { 'Position  ' .. (above == 0 and 'Bottom' or ('+' .. above)), false, nil, function(dir)
-      request('style', { scale = scale, pos = math.max(40, math.min(100, pos - dir * 5)), box = box })
-    end })
-    table.insert(rows, { 'Background box  ' .. (box and 'On' or 'Off'), box, function()
-      request('style', { scale = scale, pos = pos, box = not box })
-    end, stay = true })
+    local function style(label, group, on, scale2, pos2, box2)
+      table.insert(rows, { label, on, function()
+        request('style', { scale = scale2, pos = pos2, box = box2 })
+      end, style = true, group = group, stay = true })
+    end
+    for _, sz in ipairs({ { 'Small', 0.8 }, { 'Medium', 1.0 }, { 'Large', 1.3 } }) do
+      style(sz[1], 'Size', math.abs(scale - sz[2]) < 0.05, sz[2], pos, box)
+    end
+    style('Bottom', 'Position', pos >= 99, scale, 100, box)
+    style('Higher', 'Position', pos < 99, scale, 88, box)
+    style('Off', 'Background', not box, scale, pos, false)
+    style('Box', 'Background', box, scale, pos, true)
   end
   return rows
 end
@@ -280,67 +282,190 @@ local function choose(rows, idx)
   elseif row[4] then row[4](1) end
 end
 
-local function draw_panel(ass)
-  local x0, y0, x1, y1 = W - 32 - 460, 32, W - 32, H - 32
-  state.panel_rect = { x0, y0, x1, y1 }
-  rect(ass, 0, 0, W, H, 0, '000000', '8C')                    -- dim the video behind the panel
-  glass(ass, x0, y0, x1, y1, 18, nil, true)        -- the solid surface, profile colour on top
-  local titles = { playback = 'Playback', audio = 'Audio', subtitles = 'Subtitles' }
-  text(ass, x0 + 44, y0 + 40, 7, DISPLAY, 34, 700, FG, titles[state.panel])
+-- The player's sheet (Audio, Subtitles, Playback): slides up from the bottom like Frame's
+-- menus. The progress bar stays on top of it, tabs switch with L1 / R1, tracks are big cards
+-- in a row (left / right), and the subtitle style is a row of small choices under them.
+local SHEET = '1B1512' -- #12151B
+local tabs = { { 'audio', 'Audio' }, { 'subtitles', 'Subtitles' }, { 'playback', 'Playback' } }
+
+local function is_card(row) return row and not row.style end
+
+-- Shortens text to n characters (counting accented letters as one) with an ellipsis.
+local function shorten(s, n)
+  local out, count = {}, 0
+  for ch in (s or ''):gmatch('[%z\1-\127\194-\244][\128-\191]*') do
+    count = count + 1
+    if count > n then return table.concat(out) .. '…' end
+    out[#out + 1] = ch
+  end
+  return table.concat(out)
+end
+
+-- A selected item's ring: a dark gap, then white, like everything selected in Frame.
+local function ring(ass, x0, y0, x1, y1, r)
+  rect(ass, x0 - 9, y0 - 9, x1 + 9, y1 + 9, r + 9, FG, '00')
+  rect(ass, x0 - 4, y0 - 4, x1 + 4, y1 + 4, r + 4, SHEET, '00')
+end
+
+-- What's in use, for the line under each tab on the bar.
+function utf8_len(str)
+  local n = 0
+  for _ in (str or ''):gmatch('[%z\1-\127\194-\244][\128-\191]*') do n = n + 1 end
+  return n
+end
+
+function current_value(name)
+  if name == 'info' then return state.info.quality or '' end
+  if name == 'playback' then
+    local mode = state.info.mode or 'auto'
+    return ({ auto = 'Automatic', original = 'Original', server = 'Server version' })[mode] or ''
+  end
+  local saved = state.panel
+  state.panel = name
   local rows = panel_rows()
+  state.panel = saved
+  for _, r in ipairs(rows) do
+    if not r.style and r[2] then
+      local main = r[1] or ''
+      local cut = main:find(' · ', 1, true)
+      if cut then
+        local rest = main:sub(cut + 4)
+        local second = rest:find(' · ', 1, true)
+        main = main:sub(1, cut - 1) .. ' · ' .. (second and rest:sub(1, second - 1) or rest)
+      end
+      return shorten(main, 20)
+    end
+  end
+  return name == 'subtitles' and 'Off' or ''
+end
+
+-- Opens a sheet tab with the focus on what's in use (the current track or mode).
+function open_panel(name)
+  state.panel, state.zone, state.panel_focus, state.panel_first = name, 'panel', 1, 1
+  for i, r in ipairs(panel_rows()) do
+    if not r.style and r[2] then state.panel_focus = i break end
+  end
+end
+
+local function draw_panel(ass)
+  local rows = panel_rows()
+  local has_style = false
+  for _, r in ipairs(rows) do if r.style then has_style = true end end
   if state.panel_focus > #rows then state.panel_focus = #rows end
   if state.panel_focus < 1 then state.panel_focus = 1 end
-  local y = y0 + 110
-  local row_h = 62
-  -- keep the focused row in view
-  -- Scroll only as far as needed to keep the highlighted row in view, so hovering
-  -- with the mouse never makes the list jump.
-  local max_rows = math.floor((y1 - y - 30) / row_h) - ((state.panel == 'subtitles') and 1 or 0)
-  local first = state.panel_first or 1
-  if state.panel_focus < first then first = state.panel_focus end
-  if state.panel_focus > first + max_rows - 1 then first = state.panel_focus - max_rows + 1 end
-  first = math.max(1, first)
-  state.panel_first = first
-  for i = first, #rows do
-    local row = rows[i]
-    if row.header then
-      text(ass, x0 + 44, y + 14, 7, BODY, 19, 700, MUTED, row.header)
-      y = y + 46
-    end
-    if y + row_h > y1 - 16 then break end
-    local focused = (state.zone == 'panel' and state.panel_focus == i)
-    -- rows are pills like the buttons in Frame: faint when idle, solid white when selected
-    rect(ass, x0 + 24, y, x1 - 24, y + row_h - 6, (row_h - 6) / 2, FG, focused and '00' or 'EB')
-    local colour = focused and BG or FG
-    text(ass, x0 + 44, y + (row_h - 6) / 2, 4, BODY, 24, row[2] and 700 or 500, colour, row[1])
-    if row[2] then draw_check(ass, x1 - 70, y + (row_h - 6) / 2, colour) end
-    local idx = i
-    local cy = y + (row_h - 6) / 2
-    local function focus() state.zone, state.panel_focus = 'panel', idx end
-    hit('row' .. i, x0 + 24, y, x1 - 24, y + row_h - 6, function() focus(); choose(rows, idx) end, focus)
-    if row[4] then
-      -- two round arrow buttons: smaller / bigger (or lower / higher)
-      for side, dir in pairs({ l = -1, r = 1 }) do
-        local cx = (dir < 0) and (x1 - 108) or (x1 - 60)
-        local hov = state.hover == ('row' .. i .. side)
-        rect(ass, cx - 20, cy - 20, cx + 20, cy + 20, 20, focused and BG or FG, hov and (focused and '40' or 'B0') or (focused and 'C0' or 'E0'))
-        local ax = dir < 0 and -1 or 1
-        path(ass, colour, { { cx - 4 * ax, cy - 8 }, { cx + 6 * ax, cy }, { cx - 4 * ax, cy + 8 }, { cx - 6 * ax, cy + 6 }, { cx + 1 * ax, cy }, { cx - 6 * ax, cy - 6 } })
-        hit('row' .. i .. side, cx - 22, cy - 22, cx + 22, cy + 22, function() focus(); rows[idx][4](dir) end, focus)
-      end
-    end
-    y = y + row_h
+
+  local top = H - (has_style and 600 or 500)
+  state.panel_rect = { 0, top, W, H }
+  hit('sheet', 0, top, W, H, function() end)   -- empty parts of the sheet do nothing
+  rect(ass, 0, 0, W, H, 0, '000000', 'A6')                         -- dim the video
+  rect(ass, 0, top, W, H + 60, 36, SHEET, '08')                     -- the sheet
+  rect(ass, 0, top, W, top + 1, 0, FG, 'EB')
+
+  -- Progress, so you never lose your place
+  local pos = mp.get_property_number('time-pos', 0) or 0
+  local dur = mp.get_property_number('duration', 0) or 0
+  local py = top + 54
+  text(ass, 56, py, 4, BODY, 22, 600, SOFT, clock(pos))
+  text(ass, W - 56, py, 6, BODY, 22, 600, SOFT, '-' .. clock(math.max(0, dur - pos)))
+  local bx0, bx1 = 150, W - 150
+  rect(ass, bx0, py - 3, bx1, py + 3, 3, FG, 'D1')
+  if dur > 0 then rect(ass, bx0, py - 3, bx0 + (bx1 - bx0) * math.min(1, pos / dur), py + 3, 3, FG, '00') end
+
+  -- Tabs
+  local tx, ty = 56, top + 110
+  for _, t in ipairs(tabs) do
+    local w = 48 + #t[2] * 13
+    local on = state.panel == t[1]
+    if on then rect(ass, tx, ty, tx + w, ty + 56, 28, FG, 'D6') end
+    text(ass, tx + w / 2, ty + 28, 5, BODY, 24, on and 700 or 600, on and FG or SOFT, t[2])
+    local name = t[1]
+    hit('tab' .. name, tx, ty, tx + w, ty + 56, function()
+      open_panel(name)
+    end)
+    tx = tx + w + 10
   end
+
+  -- Cards
+  local cards = {}
+  for i, r in ipairs(rows) do if is_card(r) then cards[#cards + 1] = i end end
+  local cw, ch, gap = 300, 150, 24
+  local fit = math.floor((W - 112 + gap) / (cw + gap))
+  local focus_card = 1
+  for n, i in ipairs(cards) do if i == state.panel_focus then focus_card = n end end
+  local first = state.panel_first or 1
+  if is_card(rows[state.panel_focus]) then
+    if focus_card < first then first = focus_card end
+    if focus_card > first + fit - 1 then first = focus_card - fit + 1 end
+  end
+  first = math.max(1, math.min(first, math.max(1, #cards - fit + 1)))
+  state.panel_first = first
+  local cy0 = top + 200
+  local x = 56
+  for n = first, math.min(#cards, first + fit - 1) do
+    local i = cards[n]
+    local row = rows[i]
+    local focused = state.zone == 'panel' and state.panel_focus == i
+    if focused then ring(ass, x, cy0, x + cw, cy0 + ch, 26) end
+    rect(ass, x, cy0, x + cw, cy0 + ch, 26, FG, focused and '00' or (row[2] and 'D1' or 'EB'))
+    local main, rest = row[1], ''
+    local cut = (row[1] or ''):find(' · ', 1, true)
+    if cut then main, rest = row[1]:sub(1, cut - 1), row[1]:sub(cut + 4) end
+    local colour = focused and BG or FG
+    text(ass, x + 24, cy0 + 28, 7, BODY, 26, (focused or row[2]) and 700 or 600, colour, shorten(main, 18))
+    if rest ~= '' then
+      text(ass, x + 24, cy0 + ch - 26, 1, BODY, 20, 500, focused and '50423B' or MUTED, shorten(rest, 26))
+    end
+    if row[2] then draw_check(ass, x + cw - 50, cy0 + 44, colour) end
+    local idx = i
+    local function focus() state.zone, state.panel_focus = 'panel', idx end
+    hit('row' .. i, x, cy0, x + cw, cy0 + ch, function() focus(); choose(rows, idx) end, focus)
+    x = x + cw + gap
+  end
+  if #cards == 0 then
+    text(ass, 56, cy0 + 40, 4, BODY, 24, 500, MUTED,
+      state.panel == 'audio' and 'This video has no sound tracks.' or 'Nothing to choose here.')
+  end
+  if #cards > first + fit - 1 then text(ass, W - 40, cy0 + ch / 2, 6, BODY, 40, 600, MUTED, '›') end
+  if first > 1 then text(ass, 30, cy0 + ch / 2, 4, BODY, 40, 600, MUTED, '‹') end
+
   if state.panel == 'playback' then
-    text(ass, x0 + 44, y + 20, 7, BODY, 19, 500, MUTED,
+    text(ass, 56, cy0 + ch + 44, 4, BODY, 20, 500, MUTED,
       state.info.server and 'Now playing the version your server converts on the NAS.'
         or 'Now playing the original file, straight from the NAS.')
+  end
+
+  -- Subtitle style: small pills in groups (Size, Position, Background)
+  if has_style then
+    local sy = cy0 + ch + 56
+    local sx = 56
+    local last_group = nil
+    for i, r in ipairs(rows) do
+      if r.style then
+        if r.group ~= last_group then
+          if last_group then sx = sx + 30 end
+          text(ass, sx, sy + 24, 4, BODY, 21, 500, MUTED, r.group)
+          sx = sx + 20 + #r.group * 11
+          last_group = r.group
+        end
+        local w = 44 + #r[1] * 12
+        local focused = state.zone == 'panel' and state.panel_focus == i
+        if focused then ring(ass, sx, sy, sx + w, sy + 48, 24) end
+        rect(ass, sx, sy, sx + w, sy + 48, 24, FG, focused and '00' or (r[2] and 'C4' or 'EB'))
+        text(ass, sx + w / 2, sy + 24, 5, BODY, 21, (focused or r[2]) and 700 or 600, focused and BG or FG, r[1])
+        local idx = i
+        local function focus() state.zone, state.panel_focus = 'panel', idx end
+        hit('row' .. i, sx, sy, sx + w, sy + 48, function() focus(); choose(rows, idx) end, focus)
+        sx = sx + w + 10
+      end
+    end
   end
 end
 
 -- ---------- The controls ----------
 
-local buttons = { 'rew', 'play', 'ff', 'playback', 'audio', 'subtitles', 'info' }
+-- Left to right as they sit on the bar: the tabs, then -10, play, +30.
+local buttons = { 'audio', 'subtitles', 'playback', 'info', 'rew', 'play', 'ff' }
+local PLAY = 6
 
 local function draw_button(ass, name, cx, cy, size, focused)
   local r = size / 2
@@ -381,7 +506,7 @@ local function pad_legend(ass)
   local ps = state.pad == 'ps'
   local items
   if state.panel then
-    items = { { 'select', 'Select' }, { 'back', 'Close' } }
+    items = { { 'select', 'Select' }, { 'skip', 'Switch' }, { 'back', 'Close' } }
   else
     items = { { 'select', 'Select' }, { 'menu', 'Play/Pause' }, { 'skip', 'Skip' }, { 'back', 'Exit' } }
   end
@@ -390,7 +515,9 @@ local function pad_legend(ass)
   for _, it in ipairs(items) do width = width + 30 + 10 + #it[2] * 11 + 26 + (it[1] == 'skip' and 40 or 0) end
   -- Bottom left, on the same line as the buttons: the right side holds Playback, Audio,
   -- Subtitles and Info, and the middle holds play and the skips.
-  local x0, y0 = 48, H - 84 - 25
+  -- On the right of the bar (or of the open sheet), level with the buttons
+  local x0, y0 = W - 48 - width, H - 90 - 25
+  if state.panel then y0 = H - 36 - 50 end
   local x1, y1 = x0 + width, y0 + 50
   rect(ass, x0, y0, x1, y1, 25, BG, '48')
   local x, cy = x0 + 18, (y0 + y1) / 2
@@ -576,7 +703,7 @@ local function render()
     local cached = mp.get_property_number('demuxer-cache-time', 0) or 0
 
     shade(ass, 0, 230, false)
-    shade(ass, H - 330, H, true)
+    if state.panel then shade(ass, H - 330, H, true) end
 
     -- Top: Back, title, quality
     local back_focus = state.zone == 'back'
@@ -589,11 +716,18 @@ local function render()
     end
     if state.info.quality then text(ass, W - 56, 66, 6, BODY, 20, 600, SOFT, state.info.quality) end
 
-    -- Progress bar
-    local bx0, bx1, by = 56, W - 56, H - 190
+    if not state.panel then   -- with a sheet open, the sheet has its own progress bar
+    -- The bar: the same sheet as Audio / Subtitles, folded down. Choosing a tab grows it.
+    local top = H - 250
+    rect(ass, 0, top, W, H + 60, 36, SHEET, '08')
+    rect(ass, W / 2 - 32, top + 10, W / 2 + 32, top + 15, 2.5, FG, 'BF')   -- handle: it opens further
+    hit('sheet_bar', 0, top, W, H, function() end)
+
+    -- Progress bar, in the same place as on the open sheet
+    local bx0, bx1, by = 150, W - 150, top + 54
     local bar_focus = state.zone == 'bar'
-    local th = bar_focus and 8 or 5
-    rect(ass, bx0, by - th / 2, bx1, by + th / 2, th / 2, FG, 'CC')
+    local th = bar_focus and 10 or 6
+    rect(ass, bx0, by - th / 2, bx1, by + th / 2, th / 2, FG, 'D1')
     if dur > 0 then
       local played = math.min(1, pos / dur)
       local buffered = math.min(1, cached / dur)
@@ -618,33 +752,52 @@ local function render()
       rect(ass, hx - 1.5, by - 10, hx + 1.5, by + 10, 1.5, FG, '00')
     end
 
-    -- Times
+    -- Times either side of the bar; when it ends, top right under the quality
     local left = math.max(0, dur - pos)
-    text(ass, bx0, by + 36, 4, BODY, 21, 500, SOFT, clock(pos))
+    text(ass, 56, by, 4, BODY, 22, 600, SOFT, clock(pos))
+    text(ass, W - 56, by, 6, BODY, 22, 600, SOFT, '-' .. clock(left))
     if dur > 0 then
       local speed = mp.get_property_number('speed', 1) or 1
-      text(ass, W / 2, by + 36, 5, BODY, 21, 500, MUTED, 'Ends at ' .. os.date('%H:%M', os.time() + math.floor(left / speed)))
+      text(ass, W - 56, state.info.quality and 96 or 66, 6, BODY, 20, 500, MUTED,
+        'Ends at ' .. os.date('%H:%M', os.time() + math.floor(left / speed)))
     end
-    text(ass, bx1, by + 36, 6, BODY, 21, 500, SOFT, '-' .. clock(left))
 
-    -- Buttons: -10, play, +30 in the middle; Playback, Audio, Subtitles, Info on the right
-    local cy = H - 84
-    local centre = { { 'rew', W / 2 - 98, 52 }, { 'play', W / 2, 72 }, { 'ff', W / 2 + 98, 52 } }
-    local right = {}
-    local rx = W - 56 - 26
-    for i = 7, 4, -1 do right[i] = { buttons[i], rx, 52 }; rx = rx - 64 end
-    for i, b in ipairs(centre) do
-      draw_button(ass, b[1], b[2], cy, b[3], state.zone == 'buttons' and state.button == i)
+    -- Tabs on the left, each with what's in use underneath
+    local cy = top + 160
+    local tx = 56
+    for i = 1, 4 do
+      local name = buttons[i]
+      local label = ({ audio = 'Audio', subtitles = 'Subtitles', playback = 'Playback', info = 'Info' })[name]
+      local value = current_value(name)
+      local w = 44 + math.max(#label * 12, utf8_len(value) * 8.5)
+      local focused = state.zone == 'buttons' and state.button == i
+      if focused then ring(ass, tx, cy - 38, tx + w, cy + 38, 24) end
+      if focused then rect(ass, tx, cy - 38, tx + w, cy + 38, 24, FG, '00')
+      elseif name == 'info' and state.info_box then rect(ass, tx, cy - 38, tx + w, cy + 38, 24, FG, 'E6') end
+      text(ass, tx + 22, cy - 2, 1, BODY, 23, 700, focused and BG or FG, label)
+      if value ~= '' then text(ass, tx + 22, cy + 2, 7, BODY, 18, 500, focused and '50423B' or MUTED, value) end
+      local idx = i
+      hit('btn' .. i, tx, cy - 38, tx + w, cy + 38, function() state.zone, state.button = 'buttons', idx; activate() end,
+        function() state.zone, state.button = 'buttons', idx end)
+      tx = tx + w + 6
+    end
+
+    -- -10, play, +30 in the middle
+    local centre = { { 5, W / 2 - 100, 64 }, { 6, W / 2, 84 }, { 7, W / 2 + 100, 64 } }
+    for _, b in ipairs(centre) do
+      local i = b[1]
+      local focused = state.zone == 'buttons' and state.button == i
+      if focused then
+        local r = b[3] / 2
+        rect(ass, b[2] - r - 9, cy - r - 9, b[2] + r + 9, cy + r + 9, r + 9, FG, '00')
+        rect(ass, b[2] - r - 4, cy - r - 4, b[2] + r + 4, cy + r + 4, r + 4, SHEET, '00')
+      end
+      draw_button(ass, buttons[i], b[2], cy, b[3], focused)
       local idx = i
       hit('btn' .. i, b[2] - b[3] / 2, cy - b[3] / 2, b[2] + b[3] / 2, cy + b[3] / 2, function() state.zone, state.button = 'buttons', idx; activate() end,
         function() state.zone, state.button = 'buttons', idx end)
     end
-    for i = 4, 7 do
-      local b = right[i]
-      draw_button(ass, b[1], b[2], cy, b[3], state.zone == 'buttons' and state.button == i)
-      local idx = i
-      hit('btn' .. i, b[2] - 28, cy - 28, b[2] + 28, cy + 28, function() state.zone, state.button = 'buttons', idx; activate() end,
-        function() state.zone, state.button = 'buttons', idx end)
+
     end
 
     room_people(ass)
@@ -673,7 +826,7 @@ end
 local function show(focus_play)
   if not state.visible then
     state.visible = true
-    if focus_play then state.zone, state.button = 'buttons', 2 end
+    if focus_play then state.zone, state.button = 'buttons', PLAY end
   end
   render()
   schedule_hide()
@@ -692,7 +845,7 @@ function activate()
   elseif b == 'rew' then seek_by(-10)
   elseif b == 'ff' then seek_by(30)
   elseif b == 'info' then state.info_box = not state.info_box
-  else state.panel, state.zone, state.panel_focus, state.panel_first = b, 'panel', 1, 1 end
+  else open_panel(b) end
   show()
 end
 
@@ -724,17 +877,48 @@ local function key(k)
     return
   end
   if k == 'playpause' then toggle_pause() show() return end
+  if state.panel and (k == 'rew' or k == 'ff') then
+    local at = 1
+    for i, t in ipairs(tabs) do if t[1] == state.panel then at = i end end
+    at = at + (k == 'ff' and 1 or -1)
+    if at < 1 then at = #tabs elseif at > #tabs then at = 1 end
+    open_panel(tabs[at][1])
+    show()
+    return
+  end
   if k == 'rew' then seek_by(-10) show() return end
   if k == 'ff' then seek_by(30) show() return end
   if k == 'info' then state.info_box = not state.info_box show() return end
 
   if state.zone == 'panel' then
     local rows = panel_rows()
-    if k == 'up' then state.panel_focus = math.max(1, state.panel_focus - 1)
-    elseif k == 'down' then state.panel_focus = math.min(#rows, state.panel_focus + 1)
+    local cur = rows[state.panel_focus]
+    local on_style = cur and cur.style
+    -- the row the focus is on: the track cards, or the style choices under them
+    local same = {}
+    for i, r in ipairs(rows) do if (r.style and true or false) == (on_style and true or false) then same[#same + 1] = i end end
+    local at = 1
+    for n, i in ipairs(same) do if i == state.panel_focus then at = n end end
+    if k == 'left' then state.panel_focus = same[math.max(1, at - 1)] or state.panel_focus
+    elseif k == 'right' then state.panel_focus = same[math.min(#same, at + 1)] or state.panel_focus
+    elseif k == 'down' and not on_style then
+      for i, r in ipairs(rows) do
+        if r.style then
+          state.last_card = state.panel_focus
+          -- land on the choice in use in the first group (the current size)
+          state.panel_focus = i
+          for j = i, #rows do if rows[j].style and rows[j].group == r.group and rows[j][2] then state.panel_focus = j break end end
+          break
+        end
+      end
+    elseif k == 'up' and on_style then
+      local back = state.last_card
+      if not (rows[back] and not rows[back].style) then
+        back = 1
+        for i, r in ipairs(rows) do if not r.style and r[2] then back = i break end end
+      end
+      state.panel_focus = back
     elseif k == 'back' then state.panel = nil; state.zone = 'buttons'
-    elseif (k == 'left' or k == 'right') and rows[state.panel_focus] and rows[state.panel_focus][4] then
-      rows[state.panel_focus][4](k == 'right' and 1 or -1)
     elseif k == 'select' then choose(rows, state.panel_focus)
     end
     show()
@@ -926,7 +1110,7 @@ local function finish_loading()
   mp.add_timeout(0.5, function()
     state.loading_fade = nil
     loading_timer:kill()
-    state.zone, state.button = 'buttons', 2
+    state.zone, state.button = 'buttons', PLAY
     show(true)
   end)
 end

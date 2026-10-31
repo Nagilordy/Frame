@@ -744,17 +744,25 @@ class _TogetherPillState extends State<TogetherPill> {
   }
 }
 
-/// Your party: who's in it, rejoin what's playing, or leave.
+/// Your party: who's in it, rejoin what's playing, or leave. A tall card on the right of the
+/// screen, like the PS5's party panel.
 Future<void> showPartyMenu(BuildContext context, Jellyfin jf) {
   return showGeneralDialog(
     context: context,
     barrierDismissible: true,
     barrierLabel: 'Close',
-    barrierColor: const Color(0x8C06080B),
-    transitionDuration: const Duration(milliseconds: 180),
+    barrierColor: const Color(0x9906080B),
+    transitionDuration: const Duration(milliseconds: 240),
     pageBuilder: (ctx, _, __) => _PartyMenu(jf: jf, home: context),
-    transitionBuilder: (ctx, a, _, child) =>
-        FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOut), child: child),
+    // Slides in from the right.
+    transitionBuilder: (ctx, a, _, child) => FadeTransition(
+      opacity: CurvedAnimation(parent: a, curve: const Interval(0, 0.6, curve: Curves.easeOut)),
+      child: SlideTransition(
+        position: Tween(begin: const Offset(0.06, 0), end: Offset.zero)
+            .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
+        child: child,
+      ),
+    ),
   );
 }
 
@@ -763,20 +771,74 @@ class _PartyMenu extends StatelessWidget {
   final Jellyfin jf;
   final BuildContext home;
 
+  static const _card = Color(0xFF12151B);
+  static const _colors = [Color(0xFF6F8CFF), Color(0xFFEE6E90), Color(0xFF4FD1AE), Color(0xFFF2B05A), Color(0xFFA884F5)];
+
+  // A friend's colour, always the same for the same name.
+  static Color _colorOf(String name) => _colors[name.codeUnits.fold<int>(0, (a, c) => a + c) % _colors.length];
+
+  // A big pill button, white with a ring when selected (like Play on Home).
+  Widget _pill(IconData icon, String label, VoidCallback onSelect, {bool autofocus = false}) => Focusable(
+        autofocus: autofocus,
+        onSelect: onSelect,
+        builder: (f) => AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          height: 76,
+          padding: const EdgeInsets.symmetric(horizontal: 30),
+          decoration: BoxDecoration(
+            color: f ? kFg : kFg.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: f ? const [BoxShadow(color: _card, spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)] : const [],
+          ),
+          child: Row(children: [
+            Icon(icon, size: 30, color: f ? kBg : kFg),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(label,
+                  overflow: TextOverflow.ellipsis,
+                  style: tvBody(26, weight: f ? FontWeight.w700 : FontWeight.w600, color: f ? kBg : kFg)),
+            ),
+          ]),
+        ),
+      );
+
+  Widget _person(String name, String note, {bool you = false}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(children: [
+          Container(
+            width: 60,
+            height: 60,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: you ? kAccent : _colorOf(name)),
+            child: Text(name.isEmpty ? '?' : name.characters.first.toUpperCase(), style: tvDisplay(26).copyWith(color: kBg)),
+          ),
+          const SizedBox(width: 18),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(you ? '$name (you)' : name, overflow: TextOverflow.ellipsis, style: tvBody(26, weight: FontWeight.w600)),
+              if (note.isNotEmpty) Text(note, style: tvBody(20, color: kMuted)),
+            ]),
+          ),
+        ]),
+      );
+
   @override
   Widget build(BuildContext context) {
     final sync = SyncPlay.of(jf);
     final group = sync.group.value;
     final playing = sync.nowPlaying;
-    Widget item(IconData icon, String label, VoidCallback onSelect, {bool autofocus = false, bool quiet = false}) =>
-        Focusable(
-          autofocus: autofocus,
-          onSelect: onSelect,
-          builder: (f) => Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: surfaceRow(label, focused: f, icon: icon, quiet: quiet),
-          ),
-        );
+    final me = jf.userName ?? '';
+    final people = group?.people ?? const <String>[];
+    final others = people.where((p) => p != me).toList();
+    final state = group?.state ?? '';
+    final doing = playing == null
+        ? 'On Home'
+        : state == 'Playing'
+            ? 'Watching'
+            : state == 'Paused'
+                ? 'Paused'
+                : 'Getting ready';
+    final count = people.isEmpty ? 1 : people.length;
     return PadHints(
       hints: const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')],
       child: Focus(
@@ -792,37 +854,81 @@ class _PartyMenu extends StatelessWidget {
         child: TvCanvas(
           child: Stack(children: [
             Positioned(
-              right: 120,
-              top: 128,
+              top: 48,
+              right: 48,
+              bottom: 48,
+              width: 660,
               child: Material(
                 type: MaterialType.transparency,
-                child: Surface(
-                  width: 560,
-                  padding: const EdgeInsets.all(18),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-                      child: Text('Watch party', style: tvDisplay(30)),
+                child: Container(
+                  padding: const EdgeInsets.all(44),
+                  decoration: BoxDecoration(
+                    color: _card.withOpacity(0.97),
+                    borderRadius: BorderRadius.circular(36),
+                    border: Border.all(color: kFg.withOpacity(0.08)),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    // What the party is up to.
+                    Row(children: [
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF4FD1AE)),
+                      ),
+                      const SizedBox(width: 12),
+                      Text('WATCH PARTY · $count ${count == 1 ? 'PERSON' : 'PEOPLE'}',
+                          style: tvBody(20, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1.6)),
+                    ]),
+                    const SizedBox(height: 10),
+                    if (playing == null) ...[
+                      Text('Nothing playing yet', style: tvDisplay(44)),
+                      const SizedBox(height: 6),
+                      Text('Pick something and it opens for everyone.', style: tvBody(24, color: kSoft)),
+                    ] else
+                      FutureBuilder<dynamic>(
+                        future: jf.item(playing.itemId),
+                        builder: (context, snap) {
+                          final item = snap.data;
+                          final title = item == null ? '' : titleOf(item);
+                          final line = item == null ? '' : episodeLine(item);
+                          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(title.isEmpty ? 'Watching together' : 'Watching $title',
+                                maxLines: 2, overflow: TextOverflow.ellipsis, style: tvDisplay(44)),
+                            const SizedBox(height: 6),
+                            Text([if (line.isNotEmpty) line, doing].join('  ·  '), style: tvBody(24, color: kSoft)),
+                          ]);
+                        },
+                      ),
+                    const SizedBox(height: 30),
+                    // Who's here.
+                    _person(me.isEmpty ? 'You' : me, sync.inParty && sync._playersOpen > 0 ? doing : 'On Home', you: true),
+                    for (final p in others) _person(p, playing == null ? 'In the party' : doing),
+                    if (others.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text('Waiting for friends: they get an invite on their Home.', style: tvBody(20, color: kMuted)),
+                      ),
+                    const Spacer(),
+                    // What you can do.
+                    FocusTraversalGroup(
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        if (playing != null) ...[
+                          _pill(Icons.play_arrow_rounded, 'Join what everyone is watching', () {
+                            Navigator.of(context).pop();
+                            sync._opening = true;
+                            _openRoomPlayer(home, jf, sync).whenComplete(() => sync._opening = false);
+                          }, autofocus: true),
+                          const SizedBox(height: 14),
+                        ],
+                        _pill(Icons.grid_view_rounded, 'Pick something for everyone', () => Navigator.of(context).pop(),
+                            autofocus: playing == null),
+                        const SizedBox(height: 14),
+                        _pill(Icons.logout_rounded, 'Leave party', () {
+                          Navigator.of(context).pop();
+                          leaveParty(home, jf);
+                        }),
+                      ]),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                      child: Text(
-                          group == null || group.people.isEmpty ? 'Just you for now' : group.people.join(', '),
-                          style: tvBody(20, color: kMuted)),
-                    ),
-                    if (playing != null)
-                      item(Icons.play_arrow_rounded, 'Join what everyone is watching', () {
-                        Navigator.of(context).pop();
-                        sync._opening = true;
-                        _openRoomPlayer(home, jf, sync).whenComplete(() => sync._opening = false);
-                      }, autofocus: true),
-                    item(Icons.movie_outlined, 'Pick something: it plays for everyone', () => Navigator.of(context).pop(),
-                        autofocus: playing == null),
-                    const SizedBox(height: 8),
-                    item(Icons.logout_rounded, 'Leave party', () {
-                      Navigator.of(context).pop();
-                      leaveParty(home, jf);
-                    }, quiet: true),
                   ]),
                 ),
               ),
@@ -962,8 +1068,9 @@ void showInvite(BuildContext context, Jellyfin jf, dynamic room) {
   showBanner(
     context,
     picture: bannerInitial(who, a, b),
-    who: who,
-    text: what.isEmpty || what == 'Watch party' ? 'Started a watch party' : 'Started watching $what',
+    who: 'Watch party',
+    text: '$who started a watch party',
+    detail: what.isEmpty || what == 'Watch party' ? null : what,
     line: a,
     action: 'Join',
     onAction: () => joinWatchTogether(context, jf, room['GroupId'].toString()),

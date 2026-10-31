@@ -78,21 +78,24 @@ class _TvTextFieldState extends State<TvTextField> {
   @override
   Widget build(BuildContext context) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-      Text(widget.label, style: tvBody(20, color: kMuted)),
+      Padding(
+        padding: const EdgeInsets.only(left: 8),
+        child: Text(widget.label, style: tvBody(21, weight: FontWeight.w600, color: kMuted)),
+      ),
       const SizedBox(height: 10),
       Focusable(
         focusNode: _outer,
         autofocus: widget.autofocus,
         onSelect: _open,
+        // A pill, like every button; selected (or typing), it gets the white ring.
         builder: (f) => AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           decoration: BoxDecoration(
-            color: kBg.withOpacity(0.55),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(
-              color: f || _editing ? kFg : kFg.withOpacity(0.16),
-              width: f || _editing ? 2.5 : 1.5,
-            ),
+            color: kFg.withOpacity(f || _editing ? 0.10 : 0.06),
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: f || _editing
+                ? const [BoxShadow(color: Color(0xFF12151B), spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 8)]
+                : const [],
           ),
           child: Focus(
             // Escape while typing with a real keyboard: back to the field as a button.
@@ -120,7 +123,7 @@ class _TvTextFieldState extends State<TvTextField> {
                 border: InputBorder.none,
                 hintText: widget.hint,
                 hintStyle: tvBody(28, color: kDim),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 30, vertical: 22),
               ),
             ),
           ),

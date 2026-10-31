@@ -31,6 +31,38 @@ What changed in each version of Frame. Newest first.
   TrueHD. The installer now includes mpv. Without it, Frame falls back to its built-in player.
 
 ### Improved
+- **New profile menu (Triangle on Home):** a PS5-style control center that slides up from the
+  bottom, with big tiles for Watch party, Switch profile, Server and Sign out.
+- **New watch party menu:** a tall card on the right, like the PS5 party panel: what everyone is
+  watching, who's in the party, and big buttons to join, pick something or leave.
+- **New notifications:** a card that slides in at the top right, under your profile, with a
+  white "△ Join" button for invites and a line counting down until it goes.
+- **New server screen** (Triangle › Server, and the first screen of a new install): your servers
+  as big cards, the one you're on marked Connected, and the address box below.
+- **Who's watching, refreshed:** the time at the top right, Home's ring on the selected profile,
+  a white Continue / Sign in button under its name, "Add profile" as a dashed circle, and the
+  server in a quiet chip next to Change server.
+- **Sign in, refreshed:** "Add a profile" with the dashed circle, the two ways in as new-style
+  cards, the Quick Connect code with one digit per tile, a running line while it waits, and
+  rounded pill fields (also on the server screen).
+- **Library sort & filter sheet:** Sort, Unwatched / 4K and Genre together in one sheet that
+  slides up from the bottom; choices apply straight away and combine. It replaces the four
+  buttons above the grid: one "Sort & filter" button now, lit up while a filter is on.
+- **Error screen in the new style:** a centred card over the faded artwork of what you tried to
+  play, with Retry (when the server was out of reach) and Back.
+- **New player controls: one sheet.** The controls now sit on a short dark sheet at the bottom
+  (progress bar on top; Audio, Subtitles, Playback and Info on the left with what's in use
+  written under each; -10, play, +30 in the middle; button guide on the right). Choosing Audio,
+  Subtitles or Playback grows the same sheet upward instead of swapping to a separate menu.
+- **Player sheet for Audio, Subtitles and Playback,** in the new style, with the progress bar on
+  top and the video still visible above it.
+  - Tabs for Audio, Subtitles and Playback; L1 / R1 (LB / RB) switch between them.
+  - Tracks are big cards in a row (language on top, details underneath), moved with left /
+    right. The one in use has a tick and is selected when the sheet opens.
+  - Subtitles: Size (Small, Medium, Large), Position (Bottom, Higher) and Background (Off, Box)
+    are small choices under the tracks; press down to reach them. They apply straight away
+    and the sheet stays open.
+  - Works with the mouse too: click a tab, card or choice; click above the sheet to close it.
 - **New app icon** on Linux (AppImage) and Windows (taskbar, Start menu, installer).
 - **Continue watching shows your next episode.** Finish an episode and the next one waits at
   the front of the row, mixed with what you stopped part-way, newest first.

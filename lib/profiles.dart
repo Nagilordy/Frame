@@ -264,6 +264,27 @@ String _normalize(String text) {
 
 // ---------- Shared pieces ----------
 
+/// The outline of "Add profile": a dashed circle.
+class _DashedCircle extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = kFg.withOpacity(0.45)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    final r = size.width / 2 - 2;
+    final c = Offset(size.width / 2, size.height / 2);
+    const dashes = 36;
+    for (var i = 0; i < dashes; i++) {
+      final a = i * 2 * 3.141592653589793 / dashes;
+      canvas.drawArc(Rect.fromCircle(center: c, radius: r), a, 3.141592653589793 / dashes, false, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedCircle old) => false;
+}
+
 /// The dark room with a soft light in the selected profile's colour, fading between colours.
 class _Room extends StatelessWidget {
   const _Room({required this.color, required this.center, required this.child});
@@ -567,10 +588,23 @@ class _WhoScreenState extends State<WhoScreen> {
             center: const Alignment(0, -0.05),
             child: Stack(children: [
               Positioned(left: 120, top: 56, child: Text('Frame', style: tvDisplay(34))),
+              // The time, top right, like the control center.
+              Positioned(
+                right: 120,
+                top: 62,
+                child: StreamBuilder<int>(
+                  stream: Stream.periodic(const Duration(seconds: 20), (i) => i),
+                  builder: (_, __) {
+                    final now = TimeOfDay.now();
+                    return Text('${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+                        style: tvBody(26, weight: FontWeight.w600, color: kSoft));
+                  },
+                ),
+              ),
               Positioned(
                 left: 0,
                 right: 0,
-                top: 230,
+                top: 220,
                 child: Text("Who's watching?", textAlign: TextAlign.center, style: tvDisplay(64)),
               ),
               if (!_loading)
@@ -611,24 +645,32 @@ class _WhoScreenState extends State<WhoScreen> {
                 child: FocusLinks(
                   up: () => _profiles.isEmpty ? focusOn(_otherNode) : focusOn(_nodes[_focused]),
                   child: Row(children: [
+                    // The server, in a quiet chip.
                     Container(
-                      width: 10,
-                      height: 10,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: _error == null ? const Color(0xFF5FD08A) : const Color(0xFFF0A23B),
-                      ),
+                      height: 56,
+                      padding: const EdgeInsets.symmetric(horizontal: 22),
+                      decoration: BoxDecoration(color: kFg.withOpacity(0.06), borderRadius: BorderRadius.circular(999)),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _error == null ? const Color(0xFF5FD08A) : const Color(0xFFF0A23B),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text(_serverName ?? 'Jellyfin', style: tvBody(22, weight: FontWeight.w600, color: kSoft)),
+                        const SizedBox(width: 12),
+                        Text(Uri.tryParse(widget.server)?.host ?? widget.server, style: tvBody(22, color: kMuted)),
+                      ]),
                     ),
-                    const SizedBox(width: 14),
-                    Text(_serverName ?? 'Jellyfin', style: tvBody(22, weight: FontWeight.w600, color: kSoft)),
-                    const SizedBox(width: 12),
-                    Text(Uri.tryParse(widget.server)?.host ?? widget.server, style: tvBody(22, color: kDim)),
-                    const SizedBox(width: 20),
+                    const SizedBox(width: 16),
                     Focusable(
                       focusNode: _serverNode,
                       onSelect: () => Navigator.of(context)
                           .push(MaterialPageRoute(builder: (_) => ServerScreen(current: widget.server))),
-                      builder: (f) => _glassPill('Change server', focused: f),
+                      builder: (f) => _glassPill('Change server', focused: f, icon: Icons.dns_outlined),
                     ),
                   ]),
                 ),
@@ -666,11 +708,7 @@ class _WhoScreenState extends State<WhoScreen> {
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         boxShadow: f
-                            ? const [
-                                BoxShadow(color: kBg, spreadRadius: 6),
-                                BoxShadow(color: kFg, spreadRadius: 11),
-                                BoxShadow(color: Color(0x99000000), blurRadius: 80, offset: Offset(0, 30), spreadRadius: 11),
-                              ]
+                            ? const [BoxShadow(color: kBg, spreadRadius: 5), BoxShadow(color: kFg, spreadRadius: 11)]
                             : const [],
                       ),
                       child: ProfileAvatar(server: widget.server, id: p.id, name: p.name, tag: p.tag, size: 236),
@@ -688,16 +726,30 @@ class _WhoScreenState extends State<WhoScreen> {
               Flexible(
                 child: Text(p.name,
                     overflow: TextOverflow.ellipsis,
-                    style: tvBody(f ? 32 : 26, weight: f ? FontWeight.w700 : FontWeight.w500, color: f ? kFg : kMuted)),
+                    style: f
+                        ? tvDisplay(34)
+                        : tvBody(26, weight: FontWeight.w600, color: kSoft)),
               ),
             ]),
-            const SizedBox(height: 10),
+            const SizedBox(height: 16),
+            // The selected profile's button: the same white pill as Play on Home.
             AnimatedOpacity(
               opacity: f ? 1 : 0,
               duration: const Duration(milliseconds: 200),
-              child: Text(
-                _busy && f ? 'Signing in…' : (p.saved != null ? 'Signed in on this PC' : (p.hasPassword ? 'Sign in' : '')),
-                style: tvBody(20, color: kDim),
+              child: Container(
+                height: 56,
+                padding: const EdgeInsets.fromLTRB(18, 0, 26, 0),
+                decoration: BoxDecoration(color: kFg, borderRadius: BorderRadius.circular(999)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(p.saved != null || !p.hasPassword ? Icons.play_arrow_rounded : Icons.lock_open_rounded,
+                      size: 28, color: kBg),
+                  const SizedBox(width: 10),
+                  Text(
+                      _busy && f
+                          ? 'Signing in…'
+                          : (p.saved != null || !p.hasPassword ? 'Continue' : 'Sign in'),
+                      style: tvBody(22, weight: FontWeight.w700, color: kBg)),
+                ]),
               ),
             ),
           ]),
@@ -729,16 +781,19 @@ class _WhoScreenState extends State<WhoScreen> {
                     height: 236,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: kFg.withOpacity(f ? 0.22 : 0.10),
-                      border: f ? Border.all(color: kFg, width: 5) : null,
+                      color: f ? kFg : Colors.transparent,
+                      boxShadow: f ? const [BoxShadow(color: kBg, spreadRadius: 5), BoxShadow(color: kFg, spreadRadius: 11)] : const [],
                     ),
-                    child: Icon(Icons.add_rounded, size: 72, color: f ? kFg : kMuted),
+                    child: CustomPaint(
+                      painter: f ? null : _DashedCircle(),
+                      child: Icon(Icons.add_rounded, size: 72, color: f ? kBg : kFg),
+                    ),
                   ),
                 ),
               ),
             ),
             const SizedBox(height: 26),
-            Text('Someone else', style: tvBody(f ? 32 : 26, weight: f ? FontWeight.w700 : FontWeight.w500, color: f ? kFg : kMuted)),
+            Text('Add profile', style: f ? tvDisplay(34) : tvBody(26, weight: FontWeight.w600, color: kSoft)),
           ]),
         ),
       ),
@@ -888,11 +943,28 @@ class _SignInScreenState extends State<SignInScreen> {
                     onSelect: () => Navigator.of(context).maybePop(),
                     builder: (f) => AnimatedContainer(
                       duration: const Duration(milliseconds: 140),
-                      width: 52,
-                      height: 52,
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: f ? kFg : kFg.withOpacity(0.12)),
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: f ? kFg : kFg.withOpacity(0.12),
+                        boxShadow: f ? const [BoxShadow(color: kBg, spreadRadius: 3), BoxShadow(color: kFg, spreadRadius: 7)] : const [],
+                      ),
                       child: Icon(Icons.arrow_back_rounded, size: 26, color: f ? kBg : kFg),
                     ),
+                  ),
+                ),
+                // The time, top right, like Who's watching.
+                Positioned(
+                  right: 120,
+                  top: 62,
+                  child: StreamBuilder<int>(
+                    stream: Stream.periodic(const Duration(seconds: 20), (i) => i),
+                    builder: (_, __) {
+                      final now = TimeOfDay.now();
+                      return Text('${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}',
+                          style: tvBody(26, weight: FontWeight.w600, color: kSoft));
+                    },
                   ),
                 ),
                 Positioned(
@@ -903,17 +975,17 @@ class _SignInScreenState extends State<SignInScreen> {
                     if (p != null)
                       ProfileAvatar(server: widget.server, id: p.id, name: p.name, tag: p.tag, size: 150)
                     else
-                      Container(
-                        width: 150,
-                        height: 150,
-                        decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: kFg.withOpacity(0.10)),
-                        child: const Icon(Icons.person_outline_rounded, size: 64, color: kMuted),
+                      // The same dashed circle as "Add profile" on Who's watching.
+                      SizedBox.square(
+                        dimension: 146,
+                        child: CustomPaint(
+                          painter: _DashedCircle(),
+                          child: const Icon(Icons.add_rounded, size: 52, color: kFg),
+                        ),
                       ),
-                    const SizedBox(height: 20),
-                    Text(p?.name ?? 'Sign in', style: tvDisplay(48)),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 22),
+                    Text(p?.name ?? 'Add a profile', style: tvDisplay(52)),
+                    const SizedBox(height: 12),
                     Text('Sign in once. Frame remembers this profile on this PC.', style: tvBody(24, color: kMuted)),
                   ]),
                 ),
@@ -925,6 +997,7 @@ class _SignInScreenState extends State<SignInScreen> {
                     _card(
                       icon: Icons.smartphone_rounded,
                       title: 'Use your phone',
+                      tag: 'Easiest',
                       children: _qcOn == false
                           ? [
                               Text('Quick Connect is off on your server.', style: tvBody(26, weight: FontWeight.w600)),
@@ -933,20 +1006,39 @@ class _SignInScreenState extends State<SignInScreen> {
                                   style: tvBody(22, color: kSoft, height: 1.45)),
                             ]
                           : [
-                              Text(_code == null ? '··· ···' : _spaced(_code!),
-                                  style: tvDisplay(92).copyWith(letterSpacing: 92 * 0.12)),
-                              const SizedBox(height: 22),
+                              // One digit per tile, in two groups of three: readable from the couch.
+                              Row(children: [
+                                for (var i = 0; i < 6; i++) ...[
+                                  if (i == 3) const SizedBox(width: 22),
+                                  Container(
+                                    width: 82,
+                                    height: 112,
+                                    margin: EdgeInsets.only(right: i == 2 || i == 5 ? 0 : 10),
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(color: kFg.withOpacity(0.08), borderRadius: BorderRadius.circular(20)),
+                                    child: Text(
+                                        _code != null && i < _code!.replaceAll(' ', '').length
+                                            ? _code!.replaceAll(' ', '')[i]
+                                            : '·',
+                                        style: tvDisplay(68)),
+                                  ),
+                                ],
+                              ]),
+                              const SizedBox(height: 30),
                               Text('In the Jellyfin app or website, open your profile, choose Quick Connect and enter this code.',
                                   style: tvBody(23, color: kSoft, height: 1.45)),
                               const Spacer(),
-                              Row(children: [
-                                Container(
-                                    width: 10,
-                                    height: 10,
-                                    decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFFF0A23B))),
-                                const SizedBox(width: 12),
-                                Text(_qcNote ?? 'Getting a code…', style: tvBody(21, color: kDim)),
-                              ]),
+                              Text(_qcNote ?? 'Getting a code…', style: tvBody(21, color: kMuted)),
+                              const SizedBox(height: 12),
+                              // A thin running line while Frame waits for the approval.
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(2),
+                                child: LinearProgressIndicator(
+                                  minHeight: 4,
+                                  backgroundColor: kFg.withOpacity(0.10),
+                                  color: widget.profile == null ? kAccent : accentFor(widget.profile!.id).$1,
+                                ),
+                              ),
                             ],
                     ),
                     const SizedBox(width: 40),
@@ -989,29 +1081,29 @@ class _SignInScreenState extends State<SignInScreen> {
     );
   }
 
-  Widget _card({required IconData icon, required String title, required List<Widget> children, bool tall = false}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(18),
-      child: Container(
-        width: 660,
-        height: tall ? 520 : 420,
-        padding: const EdgeInsets.fromLTRB(48, 44, 48, 40),
-        // The same solid surface as menus and panels, with the profile's colour on top.
-        decoration: BoxDecoration(
-          color: kSurface,
-          border: Border(top: BorderSide(color: widget.profile == null ? kAccent : accentFor(widget.profile!.id).$1, width: 4)),
-          boxShadow: const [BoxShadow(color: Color(0x80000000), blurRadius: 80, offset: Offset(0, 30))],
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            Icon(icon, size: 30, color: kFg),
-            const SizedBox(width: 14),
-            Text(title, style: tvBody(30, weight: FontWeight.w700)),
-          ]),
-          const SizedBox(height: 26),
-          ...children,
-        ]),
+  // One way in: the new style's card (dark, see-through, big corners), no coloured top line.
+  Widget _card({required IconData icon, required String title, required List<Widget> children, bool tall = false, String? tag}) {
+    return Container(
+      width: 700,
+      height: 540,
+      padding: const EdgeInsets.fromLTRB(48, 44, 48, 44),
+      decoration: BoxDecoration(
+        color: const Color(0xEB12151B),
+        borderRadius: BorderRadius.circular(36),
+        border: Border.all(color: kFg.withOpacity(0.08)),
       ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(icon, size: 30, color: kFg),
+          const SizedBox(width: 14),
+          Text(title, style: tvBody(30, weight: FontWeight.w700)),
+          const Spacer(),
+          if (tag != null)
+            Text(tag.toUpperCase(), style: tvBody(18, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1.4)),
+        ]),
+        const SizedBox(height: 36),
+        ...children,
+      ]),
     );
   }
 }
@@ -1081,107 +1173,140 @@ class _ServerScreenState extends State<ServerScreen> {
     }
   }
 
+  // One server: a big card like a poster on Home, white and lifted when selected. The one
+  // you're using is marked Connected.
+  Widget _card(int i, ({String name, String address}) server, bool current) => Focusable(
+        focusNode: _cards[i],
+        onSelect: () => _connect(server.address),
+        builder: (f) => AnimatedScale(
+          scale: f ? 1.04 : 1,
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOut,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            width: 520,
+            height: 230,
+            padding: const EdgeInsets.all(30),
+            decoration: BoxDecoration(
+              color: f ? kFg : kFg.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(30),
+              boxShadow: f ? const [BoxShadow(color: kBg, spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)] : const [],
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(Icons.dns_outlined, size: 46, color: f ? kBg : kFg),
+                const Spacer(),
+                if (current)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(color: f ? kBg : kFg, borderRadius: BorderRadius.circular(999)),
+                    child: Text('Connected', style: tvBody(18, weight: FontWeight.w700, color: f ? kFg : kBg)),
+                  ),
+              ]),
+              const Spacer(),
+              Text(server.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: tvBody(30, weight: f ? FontWeight.w700 : FontWeight.w600, color: f ? kBg : kFg)),
+              const SizedBox(height: 4),
+              Text(server.address,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: tvBody(20, color: f ? kBg.withOpacity(0.7) : kMuted)),
+            ]),
+          ),
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
     final searching = _found == null;
     final found = _found ?? const <({String name, String address})>[];
+    final first = widget.current == null; // Frame's very first screen
     return PadHints(
-      hints: [const PadHint(PadButton.select, 'Select'), if (widget.current != null) const PadHint(PadButton.back, 'Back')],
+      hints: [const PadHint(PadButton.select, 'Select'), if (!first) const PadHint(PadButton.back, 'Back')],
       child: _backOnEscape(
         context,
         Scaffold(
           backgroundColor: kBg,
           body: TvCanvas(
-            child: _Room(
-              color: const Color(0xFF6F8CFF),
-              center: const Alignment(0, -0.4),
-              child: Stack(children: [
-                Positioned(left: 120, top: 56, child: Text('Frame', style: tvDisplay(34))),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 200,
-                  child: Column(children: [
-                    Text('Find your Jellyfin server', style: tvDisplay(60)),
-                    const SizedBox(height: 18),
-                    Text(searching ? 'Looking on your network…' : (found.isEmpty ? 'None found on this network. Type its address below.' : 'Your servers'),
-                        style: tvBody(24, color: kMuted)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(120, 96, 120, 0),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                // Title, and what Frame is doing.
+                Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(first ? 'WELCOME TO FRAME' : 'SERVER',
+                        style: tvBody(20, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1.6)),
+                    const SizedBox(height: 10),
+                    Text("Where's your library?", style: tvDisplay(64)),
                   ]),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 380,
-                  child: Wrap(alignment: WrapAlignment.center, spacing: 32, runSpacing: 24, children: [
-                    for (var i = 0; i < found.length; i++)
-                      Focusable(
-                        focusNode: _cards[i],
-                        onSelect: () => _connect(found[i].address),
-                        builder: (f) => AnimatedContainer(
-                          duration: const Duration(milliseconds: 160),
-                          width: 520,
-                          padding: const EdgeInsets.all(32),
-                          decoration: BoxDecoration(
-                            color: f ? kFg : kFg.withOpacity(0.10),
-                            borderRadius: BorderRadius.circular(24),
-                          ),
-                          child: Row(children: [
-                            Icon(Icons.dns_rounded, size: 40, color: f ? kBg : kFg),
-                            const SizedBox(width: 22),
-                            Expanded(
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(found[i].name, style: tvBody(28, weight: FontWeight.w700, color: f ? kBg : kFg)),
-                                const SizedBox(height: 6),
-                                Text(found[i].address, style: tvBody(20, color: f ? kBg.withOpacity(0.7) : kDim)),
-                              ]),
-                            ),
-                          ]),
-                        ),
-                      ),
-                  ]),
-                ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 640,
-                  child: Center(
-                    child: SizedBox(
-                      width: 860,
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                          Expanded(
-                            child: _Field(
-                              label: 'Or type its address (for example 10.0.0.33:8096)',
-                              controller: _address,
-                              autofocus: false,
-                              onSubmit: () => _connect(_address.text),
-                            ),
-                          ),
-                          const SizedBox(width: 20),
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Focusable(
-                              onSelect: () => _connect(_address.text),
-                              builder: (f) => _glassPill(_busy ? 'Connecting…' : 'Connect', focused: f),
-                            ),
-                          ),
-                        ]),
-                        if (_error != null) ...[
-                          const SizedBox(height: 16),
-                          Text(_error!, style: tvBody(22, color: const Color(0xFFFF9A8A))),
-                        ],
-                      ]),
+                  const Spacer(),
+                  if (searching)
+                    Row(children: [
+                      const Icon(Icons.wifi_rounded, size: 26, color: kSoft),
+                      const SizedBox(width: 12),
+                      Text('Looking on your network…', style: tvBody(22, color: kSoft)),
+                    ])
+                  else
+                    Focusable(
+                      onSelect: _search,
+                      builder: (f) => _glassPill('Search again', focused: f, icon: Icons.refresh_rounded),
                     ),
-                  ),
+                ]),
+                const SizedBox(height: 56),
+                // Servers: yours first, then what the network answered.
+                Text(
+                    searching
+                        ? ' '
+                        : found.isEmpty
+                            ? 'None found on this network: type its address below.'
+                            : 'Your servers',
+                    style: tvBody(22, weight: FontWeight.w700, color: kSoft)),
+                const SizedBox(height: 20),
+                SizedBox(
+                  height: 250,
+                  child: found.isEmpty
+                      ? const SizedBox.shrink()
+                      : FocusTraversalGroup(
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            clipBehavior: Clip.none,
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            itemCount: found.length,
+                            separatorBuilder: (_, __) => const SizedBox(width: 30),
+                            itemBuilder: (_, i) => _card(i, found[i], found[i].address == widget.current),
+                          ),
+                        ),
                 ),
-                Positioned(
-                  left: 120,
-                  bottom: 56,
-                  child: Focusable(
-                    onSelect: _search,
-                    builder: (f) => _glassPill('Search again', focused: f, icon: Icons.refresh_rounded),
-                  ),
+                const SizedBox(height: 40),
+                // Or type an address.
+                Text('Or enter an address', style: tvBody(22, weight: FontWeight.w700, color: kSoft)),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: 1100,
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Expanded(
+                      child: _Field(
+                        label: 'For example 192.168.1.10:8096',
+                        controller: _address,
+                        autofocus: false,
+                        onSubmit: () => _connect(_address.text),
+                      ),
+                    ),
+                    const SizedBox(width: 20),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Focusable(
+                        onSelect: () => _connect(_address.text),
+                        builder: (f) => _glassPill(_busy ? 'Connecting…' : 'Connect', focused: f, icon: Icons.arrow_forward_rounded),
+                      ),
+                    ),
+                  ]),
                 ),
+                const SizedBox(height: 14),
+                Text(_error ?? 'Selecting the box opens the on-screen keyboard. Your profiles on each server are kept.',
+                    style: tvBody(20, color: _error != null ? const Color(0xFFFF9A8A) : kMuted)),
               ]),
             ),
           ),
@@ -1241,13 +1366,14 @@ Future<void> showProfileMenu(BuildContext context, Jellyfin jf) {
     context: context,
     barrierDismissible: true,
     barrierLabel: 'Close',
-    barrierColor: const Color(0x8C06080B),
-    transitionDuration: const Duration(milliseconds: 180),
+    barrierColor: const Color(0x9E06080B),
+    transitionDuration: const Duration(milliseconds: 260),
     pageBuilder: (ctx, _, __) => _ProfileMenu(jf: jf, home: context),
+    // Slides up from the bottom, like the PS5's control center.
     transitionBuilder: (ctx, a, _, child) => FadeTransition(
-      opacity: CurvedAnimation(parent: a, curve: Curves.easeOut),
+      opacity: CurvedAnimation(parent: a, curve: const Interval(0, 0.6, curve: Curves.easeOut)),
       child: SlideTransition(
-        position: Tween(begin: const Offset(0, -0.015), end: Offset.zero)
+        position: Tween(begin: const Offset(0, 0.18), end: Offset.zero)
             .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
         child: child,
       ),
@@ -1312,22 +1438,50 @@ class _ProfileMenuState extends State<_ProfileMenu> {
     if (mounted) _openWho(context, jf.server);
   }
 
-  Widget _item(IconData icon, String label, VoidCallback onSelect, {bool autofocus = false, bool quiet = false}) {
+  // One big tile of the control center: white and slightly lifted when selected, like a poster
+  // on Home (a ring of spread-only shadows: no blur, cheap to draw at any size).
+  Widget _tile(IconData icon, String label, VoidCallback onSelect, {bool autofocus = false, bool warn = false}) {
     return Focusable(
       autofocus: autofocus,
       onSelect: onSelect,
-      builder: (f) => Padding(
-        padding: const EdgeInsets.only(top: 8),
-        child: surfaceRow(label, focused: f, icon: icon, quiet: quiet),
+      builder: (f) => AnimatedScale(
+        scale: f ? 1.06 : 1,
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 240,
+          height: 200,
+          padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            color: f ? kFg : kFg.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: f
+                ? const [BoxShadow(color: _sheet, spreadRadius: 4), BoxShadow(color: kFg, spreadRadius: 9)]
+                : const [],
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(icon, size: 44, color: f ? kBg : (warn ? const Color(0xFFEE6E90) : kFg)),
+            const Spacer(),
+            Text(label,
+                maxLines: 2,
+                style: tvBody(26, weight: f ? FontWeight.w700 : FontWeight.w600, color: f ? kBg : kFg, height: 1.15)),
+          ]),
+        ),
       ),
     );
   }
 
+  static const _sheet = Color(0xFF12151B);
+
   @override
   Widget build(BuildContext context) {
     final name = jf.userName?.isNotEmpty == true ? jf.userName! : 'Profile';
+    final now = TimeOfDay.now();
+    final clock = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    final inParty = SyncPlay.of(jf).inParty;
     return PadHints(
-      hints: const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.menu, 'Close')],
+      hints: const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')],
       child: Focus(
         canRequestFocus: false,
         skipTraversal: true,
@@ -1341,51 +1495,58 @@ class _ProfileMenuState extends State<_ProfileMenu> {
         },
         child: TvCanvas(
           child: Stack(children: [
+            // The control center: a sheet across the bottom of the screen.
             Positioned(
-              right: 120,
-              top: 128,
+              left: 0,
+              right: 0,
+              bottom: 0,
               child: Material(
                 type: MaterialType.transparency,
-                child: Surface(
-                    width: 520,
-                    padding: const EdgeInsets.all(18),
-                    child: FocusTraversalGroup(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
-                          child: Row(children: [
-                            ProfileAvatar(server: jf.server, id: jf.userId ?? '', name: name, tag: jf.userImageTag, size: 72),
-                            const SizedBox(width: 18),
-                            Expanded(
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(name, style: tvDisplay(30)),
-                                const SizedBox(height: 6),
-                                Row(children: [
-                                  Container(
-                                      width: 9,
-                                      height: 9,
-                                      decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF5FD08A))),
-                                  const SizedBox(width: 8),
-                                  Flexible(
-                                    child: Text(
-                                        '${_serverName ?? 'Jellyfin'} · ${Uri.tryParse(jf.server)?.host ?? ''}',
-                                        overflow: TextOverflow.ellipsis,
-                                        style: tvBody(19, color: kMuted)),
-                                  ),
-                                ]),
-                              ]),
-                            ),
-                          ]),
+                child: Container(
+                  height: 470,
+                  padding: const EdgeInsets.fromLTRB(120, 40, 120, 0),
+                  decoration: BoxDecoration(
+                    color: _sheet.withOpacity(0.97),
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
+                    border: Border(top: BorderSide(color: kFg.withOpacity(0.08))),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    // Who you are, and the time.
+                    Row(children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          boxShadow: [const BoxShadow(color: _sheet, spreadRadius: 3), BoxShadow(color: kAccent, spreadRadius: 6)],
                         ),
-                        _item(Icons.groups_rounded, SyncPlay.of(jf).inParty ? 'Your watch party' : 'Start a watch party', _party,
+                        child: ProfileAvatar(server: jf.server, id: jf.userId ?? '', name: name, tag: jf.userImageTag, size: 72),
+                      ),
+                      const SizedBox(width: 22),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(name, style: tvDisplay(32)),
+                          const SizedBox(height: 4),
+                          Text('${_serverName ?? 'Jellyfin'} · ${Uri.tryParse(jf.server)?.host ?? ''}',
+                              overflow: TextOverflow.ellipsis, style: tvBody(22, color: kMuted)),
+                        ]),
+                      ),
+                      Text(clock, style: tvBody(26, weight: FontWeight.w600, color: kSoft)),
+                    ]),
+                    const SizedBox(height: 40),
+                    // The actions: big tiles in one row.
+                    FocusTraversalGroup(
+                      child: Row(children: [
+                        _tile(Icons.groups_rounded, inParty ? 'Your watch party' : 'Start a watch party', _party,
                             autofocus: true),
-                        _item(Icons.people_outline_rounded, 'Switch profile', _switch),
-                        _item(Icons.dns_outlined, 'Server', _server),
-                        const SizedBox(height: 8),
-                        _item(Icons.logout_rounded, _confirmSignOut ? 'Press again to sign out' : 'Sign out of $name', _signOut,
-                            quiet: !_confirmSignOut),
+                        const SizedBox(width: 28),
+                        _tile(Icons.switch_account_rounded, 'Switch profile', _switch),
+                        const SizedBox(width: 28),
+                        _tile(Icons.dns_outlined, 'Server', _server),
+                        const SizedBox(width: 28),
+                        _tile(Icons.logout_rounded, _confirmSignOut ? 'Press again to sign out' : 'Sign out', _signOut,
+                            warn: _confirmSignOut),
                       ]),
                     ),
+                  ]),
                 ),
               ),
             ),
