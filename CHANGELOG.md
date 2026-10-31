@@ -15,7 +15,8 @@ What changed in each version of Frame. Newest first.
     watching" and "Leave party".
   - You only leave when you choose Leave party, switch profile or sign out.
 - **Up next.** Near the end of an episode, a card shows the next one. It appears where the
-  credits start if the server knows, otherwise 30 seconds before the end.
+  credits start if the server knows, otherwise 20 seconds before the end.
+  The next episode starts 10 seconds after the card appears.
   - Cross plays it now, Circle hides the card.
   - At the end, or when you skip past the end, the next episode starts by itself, across
     seasons, without leaving the player.
@@ -50,6 +51,10 @@ What changed in each version of Frame. Newest first.
   buttons above the grid: one "Sort & filter" button now, lit up while a filter is on.
 - **Error screen in the new style:** a centred card over the faded artwork of what you tried to
   play, with Retry (when the server was out of reach) and Back.
+- **Up next card in the new style:** a rounded card at the bottom right with the next episode's
+  picture, title, season / episode and length. The white Play now pill fills up during the
+  10-second countdown; "Watch the credits" (Circle) hides it and lets the episode play out.
+  In a watch party only the host's countdown moves everyone on.
 - **New player controls: one sheet.** The controls now sit on a short dark sheet at the bottom
   (progress bar on top; Audio, Subtitles, Playback and Info on the left with what's in use
   written under each; -10, play, +30 in the middle; button guide on the right). Choosing Audio,

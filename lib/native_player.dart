@@ -13,6 +13,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -644,8 +645,8 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
   // ---------- Up next ----------
   //
   // For episodes: near the end a card offers the next one (from where the credits start when
-  // the server knows, otherwise 30 s before the end). Cross plays it now, Circle hides the
-  // card. When the episode ends (or you skip past the end), the next one starts by itself, in
+  // the server knows, otherwise 20 s before the end); the next one starts 10 s later. Cross
+  // plays it now, Circle hides the card. When the episode ends (or you skip past the end), the next one starts by itself, in
   // the same full screen, without going back to Frame. In a Watch together room, the room
   // moves on together.
 
@@ -665,8 +666,81 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       _creditsAt = results[1] as double?;
       if (_next != null) debugPrint('Player: up next is ${episodeLine(_next)}');
       if (!_ended) await _sendInfo();
+      if (_next != null) unawaited(_loadNextPicture());
     } catch (e) {
       debugPrint('Player: next episode unknown ($e)');
+    }
+  }
+
+  // The next episode's picture for the Up next card, downloaded once while this one plays.
+  // The player's controls cut a hole in the card and ask for it with 'next_image'.
+  Uint8List? _nextPicture;
+  String? _nextPictureShown; // what's on screen now ("x,y,w,h"), or null
+  String? _nextPictureFile;
+
+  Future<void> _loadNextPicture() async {
+    final next = _next;
+    if (next == null) return;
+    try {
+      final res = await Jellyfin.client
+          .get(Uri.parse(widget.jf.thumbFor(next, maxWidth: 640)))
+          .timeout(const Duration(seconds: 6));
+      if (res.statusCode != 200 || res.bodyBytes.isEmpty || _ended) return;
+      _nextPicture = res.bodyBytes;
+      await _sendInfo(); // the card now leaves room for it
+    } catch (e) {
+      debugPrint('Player: no picture for up next ($e)');
+    }
+  }
+
+  // x, y, w, h are in the controls' 1920 x 1080 space.
+  Future<void> _showNextPicture(Map value) async {
+    final show = value['show'] == true;
+    if (!show) {
+      if (_nextPictureShown != null) {
+        _nextPictureShown = null;
+        _mpv.command(['overlay-remove', 1]).then((_) {}, onError: (_) {});
+      }
+      return;
+    }
+    final bytes = _nextPicture;
+    if (bytes == null) return;
+    try {
+      final d = await _mpv.get('osd-dimensions');
+      if (d is! Map) return;
+      final ow = ((d['w'] ?? 0) as num).toDouble(), oh = ((d['h'] ?? 0) as num).toDouble();
+      if (ow <= 0 || oh <= 0) return;
+      final sx = ow / 1920, sy = oh / 1080;
+      final x = ((value['x'] as num) * sx).round(), y = ((value['y'] as num) * sy).round();
+      final w = ((value['w'] as num) * sx).round(), h = ((value['h'] as num) * sy).round();
+      final key = '$x,$y,$w,$h';
+      if (key == _nextPictureShown) return;
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: w, targetHeight: h);
+      final image = (await codec.getNextFrame()).image;
+      final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba); // premultiplied
+      if (data == null || _ended) return;
+      final px = data.buffer.asUint8List();
+      final r = 16 * sy; // round corners, like the cards in Frame
+      for (var j = 0; j < h; j++) {
+        for (var i = 0; i < w; i++) {
+          final o = (j * w + i) * 4;
+          final t = px[o];
+          px[o] = px[o + 2]; // mpv wants blue-green-red-alpha
+          px[o + 2] = t;
+          final cx = i < r ? r - i : (i >= w - r ? i - (w - 1 - r) : 0.0);
+          final cy = j < r ? r - j : (j >= h - r ? j - (h - 1 - r) : 0.0);
+          if (cx > 0 && cy > 0 && cx * cx + cy * cy > r * r) {
+            px[o] = px[o + 1] = px[o + 2] = px[o + 3] = 0;
+          }
+        }
+      }
+      final file = _nextPictureFile ??= '${Directory.systemTemp.path}${Platform.pathSeparator}frame-next-$pid.bgra';
+      await File(file).writeAsBytes(px, flush: true);
+      if (_ended) return;
+      _nextPictureShown = key;
+      await _mpv.command(['overlay-add', 1, x, y, file, 0, 'bgra', w, h, w * 4]);
+    } catch (e) {
+      debugPrint('Player: up next picture not shown ($e)');
     }
   }
 
@@ -1167,7 +1241,14 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
       case 'sync':
         if (value is Map) await _togetherRequest(value);
       case 'next':
+        // The card's countdown ran out: in a room, only the one who opened it moves everyone
+        // on (pressing Play now still works for anyone).
+        final room = _sync;
+        if (value == 'auto' && room != null && !room.isHost) return;
         await _playNext();
+        return;
+      case 'next_image':
+        if (value is Map) await _showNextPicture(value);
         return;
       case 'loaded':
         _videoStarted = true;
@@ -1226,11 +1307,19 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
           }
       ],
       if (_room != null) 'group': _room,
-      // Up next: what, and from when (the credits, or 30 s before the end).
+      // Up next: what, and from when (the credits, or 20 s before the end).
       if (_next != null && !_nextDismissed)
         'next': {
           'title': episodeLine(_next),
-          if (_creditsAt != null) 'at': _creditsAt, // otherwise the controls use 30 s before the end
+          'name': (_next['Name'] ?? '').toString(),
+          'line': [
+            if (_next['ParentIndexNumber'] != null) 'S${_next['ParentIndexNumber']}',
+            if (_next['IndexNumber'] != null) 'E${_next['IndexNumber']}',
+          ].join(' · '),
+          if (_next['IndexNumber'] != null) 'number': 'E${_next['IndexNumber']}',
+          if (_next['RunTimeTicks'] is num) 'minutes': ((_next['RunTimeTicks'] as num) / 600000000).round(),
+          'thumb': _nextPicture != null,
+          if (_creditsAt != null) 'at': _creditsAt, // otherwise the controls use 20 s before the end
         },
       // Your profile colour for the panels' line (mpv writes colours blue-green-red).
       'accent': [kAccent.blue, kAccent.green, kAccent.red].map((c) => c.toRadixString(16).padLeft(2, '0')).join().toUpperCase(),

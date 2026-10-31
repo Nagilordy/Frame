@@ -619,43 +619,124 @@ end
 -- Near the end of an episode: a card with the next one. Cross plays it now, Circle hides it.
 -- Frame sends the title and, when the server knows where the credits start, from when.
 
+local UP_NEXT_WAIT = 10
 local function up_next()
   local n = state.info.next
   if type(n) ~= 'table' or state.next_hidden then return nil end
   local dur = mp.get_property_number('duration', 0) or 0
   if dur < 60 then return nil end
   local pos = mp.get_property_number('time-pos', 0) or 0
-  local at = tonumber(n.at) or (dur - 30)
-  if pos < at then return nil end
-  return n, math.max(0, dur - pos), math.max(1, dur - at)
+  -- The card appears when the credits start (if the server knows), otherwise 20 s before the
+  -- end. The next episode starts UP_NEXT_WAIT seconds later (or at the end, if that's sooner).
+  local at = tonumber(n.at) or (dur - 20)
+  if pos < at then state.next_started = false return nil end
+  local go = math.min(dur, at + UP_NEXT_WAIT)
+  return n, math.max(0, go - pos), math.max(1, go - at)
+end
+
+-- Up next: a rounded card at the bottom right (above the bar when the controls are up), the
+-- same family as Frame's invite card. The episode's picture is placed by Frame (a picture,
+-- which these controls can't draw) in a hole cut in the card, since mpv draws pictures
+-- underneath the controls. Play now fills up like a timer; when it's full the next episode
+-- starts. "Watch the credits" hides the card and lets this one play to the end.
+local function send_thumb(geom)
+  local key = geom and table.concat(geom, ',') or 'off'
+  if key == state.thumb_sent then return end
+  state.thumb_sent = key
+  if geom then
+    request('next_image', { show = true, x = geom[1], y = geom[2], w = geom[3], h = geom[4] })
+  else
+    request('next_image', { show = false })
+  end
 end
 
 local function draw_up_next(ass)
   local n, left, span = up_next()
-  if not n or state.panel then return end
-  local w, h = 600, 160
+  if not n or state.panel then send_thumb(nil) return end
+  local w, h = 720, 257
   local x1 = W - 56
-  local y1 = state.visible and (H - 250) or (H - 56)
+  local y1 = state.visible and (H - 250 - 24) or (H - 56)
   local x0, y0 = x1 - w, y1 - h
-  glass(ass, x0, y0, x1, y1, 14, nil, true)
-  text(ass, x0 + 28, y0 + 34, 4, BODY, 15, 700, MUTED, 'UP NEXT')
-  text(ass, x0 + 28, y0 + 66, 4, BODY, 24, 700, FG, n.title or 'Next episode')
-  -- Play now: a white pill with a play shape
-  local px0, py0, px1, py1 = x0 + 24, y0 + 96, x0 + 210, y0 + 140
-  rect(ass, px0, py0, px1, py1, 22, FG, '00')
-  path(ass, BG, { { px0 + 26, py0 + 12 }, { px0 + 44, py0 + 22 }, { px0 + 26, py0 + 32 } })
-  text(ass, px0 + 56, (py0 + py1) / 2, 4, BODY, 20, 700, BG, 'Play now')
-  hit('next', px0, py0, px1, py1, function() request('next') end)
-  -- what the controller buttons do here (only while the controls are hidden)
-  if not state.visible and state.pad ~= 'none' then
-    local ps = state.pad == 'ps'
-    text(ass, px1 + 24, (py0 + py1) / 2, 4, BODY, 18, 600, SOFT,
-      (ps and '✕' or 'A') .. ' Play now     ' .. (ps and '○' or 'B') .. ' Hide')
+  local tx0, ty0, tx1, ty1 = x0 + 22, y0 + 22, x0 + 22 + 240, y0 + 22 + 135
+  local has_pic = n.thumb == true
+
+  -- the card, with a hole where the picture goes
+  ass:new_event()
+  ass:append(string.format('{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%s&}', SHEET, '1C'))
+  ass:draw_start()
+  ass:round_rect_cw(x0, y0, x1, y1, 28)
+  if has_pic then ass:round_rect_ccw(tx0, ty0, tx1, ty1, 16) end
+  ass:draw_stop()
+  if has_pic then
+    send_thumb({ tx0, ty0, 240, 135 })
+  else
+    send_thumb(nil)
+    rect(ass, tx0, ty0, tx1, ty1, 16, FG, 'DE')
+    text(ass, (tx0 + tx1) / 2, (ty0 + ty1) / 2, 5, DISPLAY, 34, 700, SOFT, n.number or '')
   end
-  -- the line runs down to the end of the episode, when the next one starts by itself
-  rect(ass, x0 + 6, y1 - 4, x1 - 6, y1, 0, FG, 'EB')
-  local lw = (x1 - x0 - 12) * math.max(0, math.min(1, left / span))
-  if lw > 1 then rect(ass, x0 + 6, y1 - 4, x0 + 6 + lw, y1, 0, accent_colour(), '00') end
+
+  -- what's next
+  local secs = math.ceil(left)
+  local lx = tx1 + 24
+  text(ass, lx, ty0 + 20, 4, BODY, 18, 700, MUTED, 'UP NEXT · IN ' .. secs .. ' S')
+  text(ass, lx, ty0 + 62, 4, DISPLAY, 28, 700, FG, shorten(n.name or n.title or 'Next episode', 24))
+  local line = n.line or ''
+  if n.minutes then line = (line ~= '' and line .. ' · ' or '') .. n.minutes .. ' min' end
+  if line ~= '' then text(ass, lx, ty0 + 102, 4, BODY, 21, 500, SOFT, line) end
+
+  -- Play now: fills up as the time runs out. Selected (with the ring) while the controls are
+  -- hidden, since Cross then plays it.
+  local pad = state.pad ~= 'none'
+  local ps = state.pad == 'ps'
+  local py0, py1 = ty1 + 20, ty1 + 78
+  local pw = pad and 200 or 168
+  local px0, px1 = x0 + 22, x0 + 22 + pw
+  local focused = not state.visible
+  if focused then ring(ass, px0, py0, px1, py1, 29) end
+  rect(ass, px0, py0, px1, py1, 29, FG, '2E')
+  local fill = math.max(0, math.min(1, 1 - left / span))
+  if fill > 0.02 then
+    -- the filled part keeps the pill's round left end and gets a straight edge as it grows
+    local fx = px0 + (px1 - px0) * fill
+    ass:new_event()
+    ass:append(string.format('{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H00&\\clip(%d,%d,%d,%d)}', FG, px0, py0, fx, py1))
+    ass:draw_start()
+    ass:round_rect_cw(px0, py0, px1, py1, 29)
+    ass:draw_stop()
+  end
+  local cx = px0 + 18
+  if pad then
+    rect(ass, cx, (py0 + py1) / 2 - 13, cx + 26, (py0 + py1) / 2 + 13, 13, BG, '00')
+    text(ass, cx + 13, (py0 + py1) / 2, 5, BODY, ps and 15 or 14, 800, FG, ps and '✕' or 'A')
+    cx = cx + 38
+  else
+    path(ass, BG, { { cx + 2, (py0 + py1) / 2 - 10 }, { cx + 18, (py0 + py1) / 2 }, { cx + 2, (py0 + py1) / 2 + 10 } })
+    cx = cx + 30
+  end
+  text(ass, cx, (py0 + py1) / 2, 4, BODY, 22, 700, BG, 'Play now')
+  hit('next', px0, py0, px1, py1, function() request('next') end)
+
+  -- Watch the credits
+  local label = 'Watch the credits'
+  local qx0 = px1 + 12
+  local qx1 = qx0 + (pad and 38 or 0) + 40 + #label * 11
+  rect(ass, qx0, py0, qx1, py1, 29, FG, 'E6')
+  local qx = qx0 + 18
+  if pad then
+    rect(ass, qx, (py0 + py1) / 2 - 13, qx + 26, (py0 + py1) / 2 + 13, 13, FG, 'D0')
+    if ps then
+      rect(ass, qx + 6, (py0 + py1) / 2 - 7, qx + 20, (py0 + py1) / 2 + 7, 7, FG)
+      rect(ass, qx + 9, (py0 + py1) / 2 - 4, qx + 17, (py0 + py1) / 2 + 4, 4, '2A2626')
+    else
+      text(ass, qx + 13, (py0 + py1) / 2, 5, BODY, 14, 800, FG, 'B')
+    end
+    qx = qx + 38
+  end
+  text(ass, qx, (py0 + py1) / 2, 4, BODY, 22, 600, FG, label)
+  hit('credits', qx0, py0, qx1, py1, function()
+    state.next_hidden = true
+    request('next_dismiss')   -- the timer redraws without the card
+  end)
 end
 
 -- The loading screen. Frame shows the same one before the player opens (the title logo
@@ -1045,7 +1126,7 @@ mp.add_forced_key_binding('MBTN_LEFT', 'frame_click', function()
   if state.loading then return end
   if not state.visible then
     local h = hit_at(mouse_xy())
-    if h and h.id == 'next' then h[5]() return end
+    if h and (h.id == 'next' or h.id == 'credits') then h[5]() return end
     show(true)
     return
   end
@@ -1090,7 +1171,13 @@ mp.add_forced_key_binding('WHEEL_DOWN', 'frame_wheel_down', function() wheel(1) 
 -- (and the Up next card, which also shows while the controls are hidden)
 local up_next_shown = false
 mp.add_periodic_timer(0.25, function()
-  local showing = up_next() ~= nil
+  local n, left = up_next()
+  local showing = n ~= nil
+  -- countdown over: on to the next episode (once; Circle hides the card and cancels it)
+  if showing and left <= 0 and not state.next_started then
+    state.next_started = true
+    request('next', 'auto')
+  end
   if state.visible or showing or up_next_shown then render() end
   up_next_shown = showing
 end)
