@@ -55,6 +55,14 @@ const features = [
         <figcaption>Watch parties: anything you play opens for everyone.</figcaption>
       </figure>
       <figure>
+        <img :src="withBase('/shots/show-page.jpg')" alt="A show page with the selected episode's full summary above the episode row">
+        <figcaption>Show pages: pick an episode and read its whole summary.</figcaption>
+      </figure>
+      <figure>
+        <img :src="withBase('/shots/movie-page.jpg')" alt="A movie page with logo, details, summary and cast">
+        <figcaption>Movie pages: everything about the film, one press from playing.</figcaption>
+      </figure>
+      <figure>
         <img :src="withBase('/shots/library.jpg')" alt="A library of anime posters">
         <figcaption>Libraries made to browse with a controller.</figcaption>
       </figure>

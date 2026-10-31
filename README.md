@@ -31,6 +31,8 @@ the couch again.
 | **Libraries** with big posters, made to browse with a controller | **Sort & filter** in one sheet: sort, unwatched only, 4K only, genres |
 | ![The player: a see-through bar with Audio, Subtitles, Playback and Info, and -10 / play / +30](docs/screenshots/player.jpg) | ![Watch together: a card explaining watch parties, with Start the party](docs/screenshots/watch-party.jpg) |
 | **The player** shows what's playing at a glance: audio, subtitles, quality | **Watch parties**: anything you play opens for everyone, in sync |
+| ![A show page: the selected episode's title, details and full summary above the season tabs and episode row](docs/screenshots/show-page.jpg) | ![A movie page: the film's logo, year, length, rating, quality, summary, cast and Play / Watch together / Mark watched](docs/screenshots/movie-page.jpg) |
+| **Show pages**: pick an episode and read its whole summary | **Movie pages**: everything about the film, one press from playing |
 
 ## Why Frame
 
