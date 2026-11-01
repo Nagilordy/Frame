@@ -421,11 +421,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final video = streams.cast<dynamic>().firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
     return video != null && video['VideoRangeType'] == 'DOVI';
   }
-  // iPhone / iPad (and Android): only files a phone plays reliably go straight from the
-  // NAS (MP4 / MOV with H.264 or HEVC, normal or HDR10, and AAC / AC3 / E-AC3 / MP3 / FLAC /
-  // ALAC sound). Anything else (MKV, Dolby Vision, TrueHD, DTS, AV1…) is converted by the
-  // server, which the NAS does with its graphics chip. If even a "simple" file fails to open,
-  // playback falls back to the server's version (see _openSource).
+  // Phones: if the original file shows no picture within a few seconds, switch to the server's
+  // version by itself, at the same moment.
   Future<void> _phoneFallback(Duration? at) async {
     // Give the original file a few seconds to show its first picture.
     for (var i = 0; i < 16; i++) {
@@ -443,23 +440,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  // iPhone / iPad (and Android), like the PC version: the original file straight from the NAS
+  // whenever possible (MKV, HEVC, HDR, TrueHD, DTS, every kind of subtitle), and the server's
+  // version only when the original can't work here:
+  // - it doesn't show a picture within a few seconds (see _phoneFallback), or
+  // - it stutters (see "Adapting to this device": the last step is the server's version), or
+  // - it's Dolby Vision Profile 5, which would play but in pink and green without the
+  //   server's colour conversion (the phone's player can't do it, unlike mpv on a PC).
   bool get _phoneNeedsServer {
     if (!(Platform.isIOS || Platform.isAndroid)) return false;
-    final item = widget.item;
-    final container = (item['Container'] ?? '').toString().toLowerCase();
-    final streams = ((item['MediaStreams'] as List?) ?? []).cast<dynamic>();
-    final video = streams.firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
-    final audio = streams.firstWhere((s) => s['Type'] == 'Audio' && s['IsDefault'] == true,
-        orElse: () => streams.firstWhere((s) => s['Type'] == 'Audio', orElse: () => null));
-    final okContainer = container.split(',').any((c) => ['mp4', 'm4v', 'mov'].contains(c.trim()));
-    final vCodec = (video?['Codec'] ?? '').toString().toLowerCase();
-    final range = (video?['VideoRangeType'] ?? 'SDR').toString();
-    final okVideo = ['h264', 'hevc'].contains(vCodec) && !range.startsWith('DOVI');
-    final aCodec = (audio?['Codec'] ?? '').toString().toLowerCase();
-    final okAudio = audio == null || ['aac', 'ac3', 'eac3', 'mp3', 'flac', 'alac'].contains(aCodec);
-    final simple = okContainer && okVideo && okAudio;
-    if (!simple) debugPrint('Player: $container / $vCodec / $aCodec on a phone: using the server\'s version');
-    return !simple;
+    if (_isDolbyVisionOnly) debugPrint('Player: Dolby Vision Profile 5 on a phone: using the server\'s version');
+    return _isDolbyVisionOnly;
   }
 
   int get _resumeTicks => widget.startTicks ?? (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;

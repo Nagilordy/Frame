@@ -64,10 +64,14 @@ What changed in each version of Frame. Newest first.
   - The app fills the whole screen, edge to edge.
   - Typing no longer shrinks and rescales the whole screen when the keyboard opens; the screen
     just slides up enough to keep the field you're typing in above the keyboard.
-  - Videos: files a phone plays reliably (MP4 / MOV, H.264 or HEVC, common sound formats) play
-    straight from the NAS; anything else (MKV, Dolby Vision, TrueHD, DTS, AV1…) uses the
-    server's converted version (H.264 first on phones). If an original file doesn't open
-    within a few seconds, Frame switches to the server's version by itself.
+  - Videos: like on a PC, the original file plays straight from the NAS whenever it can (MKV,
+    HEVC, HDR, TrueHD, DTS, every kind of subtitle), with no conversion on the server. Frame
+    switches to the server's version by itself only if the original shows no picture within a
+    few seconds or stutters. Dolby Vision Profile 5 always uses the server's version on a phone
+    (it would otherwise show pink and green).
+  - Fix: no picture on iPhone at all ("MissingPluginException … VideoOutputManager.Create"):
+    the iPhone build now includes the real video plugin (CocoaPods instead of Swift Package
+    Manager).
   - Fix: no picture on iPhone (sound and time running, "No render context set"): playback
     now waits for the picture's drawing surface before opening the video. The read-ahead
     stays in memory on phones (iOS refused mpv's cache file).
