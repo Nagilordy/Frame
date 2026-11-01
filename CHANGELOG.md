@@ -59,6 +59,9 @@ What changed in each version of Frame. Newest first.
     straight from the NAS; anything else (MKV, Dolby Vision, TrueHD, DTS, AV1…) uses the
     server's converted version (H.264 first on phones). If an original file doesn't open
     within a few seconds, Frame switches to the server's version by itself.
+  - Fix: no picture on iPhone (sound and time running, "No render context set"): playback
+    now waits for the picture's drawing surface before opening the video. The read-ahead
+    stays in memory on phones (iOS refused mpv's cache file).
   - If a video still hasn't started after 12 seconds, a box over it says what the player is
     doing (source, length, buffering, the player's last messages), to find out why.
 - **Show page: full episode summaries.** When you move onto the episodes, the space above the row

@@ -805,7 +805,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _fail("The server isn't sending the video. Check that the NAS is on.");
       }
     });
-    _start();
+    unawaited(_startWhenVideoReady());
+  }
+
+  // The picture's drawing surface has to exist before the video opens, or mpv has nowhere to
+  // draw ("No render context set": sound and time run, but no picture, on iPhone). The
+  // controller is created here (it's lazy) and playback starts once it's ready.
+  Future<void> _startWhenVideoReady() async {
+    try {
+      await controller.platform.future.timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('Player: video surface not ready ($e); starting anyway');
+    }
+    if (mounted) _start();
   }
 
   String? _failure;
@@ -883,6 +895,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await mpv.setProperty('cache-pause-wait', '1');
       // Read ahead over the network so seeks inside the buffer are instant.
       await mpv.setProperty('cache', 'yes');
+      // Phones: keep the read-ahead in memory (iOS doesn't let mpv create its cache file).
+      if (_phone) await mpv.setProperty('cache-on-disk', 'no');
       // (phones get a smaller read-ahead: iOS stops apps that use too much memory)
       await mpv.setProperty('demuxer-max-bytes', _phone ? '64MiB' : '256MiB');
       await mpv.setProperty('demuxer-max-back-bytes', _phone ? '32MiB' : '128MiB');
