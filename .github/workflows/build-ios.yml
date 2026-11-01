@@ -15,6 +15,13 @@ jobs:
         with:
           channel: stable
 
+      # The video plugin (media_kit_video, from the community fork in pubspec.yaml) only finds
+      # its iPhone video libraries through CocoaPods. With Flutter's newer Swift Package Manager
+      # it builds an empty placeholder instead, and playback fails with "MissingPluginException
+      # ... VideoOutputManager.Create" / "No render context set". So: CocoaPods.
+      - name: Use CocoaPods for plugins (needed for video)
+        run: flutter config --no-enable-swift-package-manager
+
       - name: Create the iPhone project files
         run: flutter create --platforms=ios --org com.kevin .
 
@@ -43,6 +50,11 @@ jobs:
       - name: Build the app without signing
         # The commit goes into the app, shown in the "Why isn't it playing?" box.
         run: flutter build ios --release --no-codesign --dart-define=FRAME_BUILD=${GITHUB_SHA::7}
+
+      - name: Check the video libraries made it into the app (warning only)
+        run: |
+          ls build/ios/iphoneos/Runner.app/Frameworks
+          ls build/ios/iphoneos/Runner.app/Frameworks | grep -qi '^mpv' || echo "::warning::Mpv framework not found in the app: video may not play"
 
       - name: Package as an IPA
         run: |
