@@ -91,6 +91,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     ),
   );
   static final bool _phone = Platform.isIOS || Platform.isAndroid;
+  // Which commit this app was built from (set by the iPhone build workflow), to tell builds apart.
+  static const String _build = String.fromEnvironment('FRAME_BUILD', defaultValue: 'dev');
   final List<String> _phoneLog = []; // the last few things mpv said (phones only)
   bool _showPhoneLog = false;
   late final VideoController controller = VideoController(
@@ -790,6 +792,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _phoneLog.add('[${l.level}] ${l.prefix}: ${l.text.trim()}');
         if (_phoneLog.length > 14) _phoneLog.removeAt(0);
         if (_showPhoneLog && mounted) setState(() {});
+        if (l.text.contains('No render context set')) unawaited(_retryAfterSurface());
       }));
       _subs.add(player.stream.error.listen((e) {
         _phoneLog.add('[error] $e');
@@ -812,12 +815,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // draw ("No render context set": sound and time run, but no picture, on iPhone). The
   // controller is created here (it's lazy) and playback starts once it's ready.
   Future<void> _startWhenVideoReady() async {
+    final watch = Stopwatch()..start();
     try {
-      await controller.platform.future.timeout(const Duration(seconds: 5));
+      await controller.platform.future.timeout(const Duration(seconds: 10));
+      _note('video surface ready after ${watch.elapsedMilliseconds} ms');
     } catch (e) {
-      debugPrint('Player: video surface not ready ($e); starting anyway');
+      _note('video surface NOT ready after ${watch.elapsedMilliseconds} ms ($e); starting anyway');
     }
     if (mounted) _start();
+  }
+
+  // A line of our own in the phone diagnostics box (and the debug console).
+  void _note(String text) {
+    debugPrint('Player: $text');
+    if (!_phone) return;
+    _phoneLog.add('[frame] $text');
+    if (_phoneLog.length > 14) _phoneLog.removeAt(0);
+    if (_showPhoneLog && mounted) setState(() {});
+  }
+
+  // mpv gave up on the picture because its drawing surface wasn't there yet ("No render
+  // context set"): sound and time keep running, but mpv won't retry the picture for this
+  // file. Once the surface exists, open the same video again at the same moment (once).
+  bool _surfaceRetried = false;
+  Future<void> _retryAfterSurface() async {
+    if (_surfaceRetried) return;
+    _surfaceRetried = true;
+    try {
+      await controller.platform.future.timeout(const Duration(seconds: 15));
+    } catch (e) {
+      _note('video surface still missing ($e); not retrying');
+      return;
+    }
+    // Let the earlier open finish before replacing it.
+    while (mounted && _switching) {
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    if (!mounted || (player.state.width ?? 0) > 0) return;
+    final at = player.state.position > Duration.zero ? player.state.position : null;
+    _note('reopening now that the video surface exists');
+    _switching = true;
+    try {
+      await _openSource(server: _server, at: at);
+    } catch (e) {
+      _note('reopen failed: $e');
+    } finally {
+      _switching = false;
+    }
   }
 
   String? _failure;
@@ -1267,7 +1311,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     decoration: BoxDecoration(color: const Color(0xE612151B), borderRadius: BorderRadius.circular(20)),
                     child: Text(
                       [
-                        "Why isn't it playing? (screenshot this)",
+                        "Why isn't it playing? (screenshot this) · build $_build",
                         '${_server ? "Server's version" : 'Original file'} · '
                             '${(widget.item['Container'] ?? '?')} · '
                             'length ${player.state.duration.inSeconds}s · '

@@ -38,7 +38,8 @@ jobs:
         run: flutter pub get
 
       - name: Build the app without signing
-        run: flutter build ios --release --no-codesign
+        # The commit goes into the app, shown in the "Why isn't it playing?" box.
+        run: flutter build ios --release --no-codesign --dart-define=FRAME_BUILD=${GITHUB_SHA::7}
 
       - name: Package as an IPA
         run: |
