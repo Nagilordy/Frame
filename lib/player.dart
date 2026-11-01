@@ -84,8 +84,15 @@ enum _Panel { none, playback, audio, subtitles }
 class _PlayerScreenState extends State<PlayerScreen> {
   // A larger buffer keeps more of the file ready, which helps smoothness and seeking over the network.
   late final Player player = Player(
-    configuration: const PlayerConfiguration(bufferSize: 256 * 1024 * 1024),
+    configuration: PlayerConfiguration(
+      bufferSize: _phone ? 64 * 1024 * 1024 : 256 * 1024 * 1024,
+      // Phones: mpv's warnings too, for the "Why isn't it playing?" box below.
+      logLevel: _phone ? MPVLogLevel.warn : MPVLogLevel.error,
+    ),
   );
+  static final bool _phone = Platform.isIOS || Platform.isAndroid;
+  final List<String> _phoneLog = []; // the last few things mpv said (phones only)
+  bool _showPhoneLog = false;
   late final VideoController controller = VideoController(
     player,
     configuration: const VideoControllerConfiguration(enableHardwareAcceleration: true),
@@ -777,6 +784,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
         if (player.state.duration == Duration.zero) _fail(message);
       });
     }));
+    // Phones: collect what mpv says, and after 12 s with no picture show it on screen.
+    if (_phone) {
+      _subs.add(player.stream.log.listen((l) {
+        _phoneLog.add('[${l.level}] ${l.prefix}: ${l.text.trim()}');
+        if (_phoneLog.length > 14) _phoneLog.removeAt(0);
+        if (_showPhoneLog && mounted) setState(() {});
+      }));
+      _subs.add(player.stream.error.listen((e) {
+        _phoneLog.add('[error] $e');
+        if (_phoneLog.length > 14) _phoneLog.removeAt(0);
+      }));
+      Timer(const Duration(seconds: 12), () {
+        if (mounted && (player.state.width ?? 0) == 0) setState(() => _showPhoneLog = true);
+      });
+    }
     // Still nothing after 25 seconds: say so instead of spinning forever.
     _openTimer = Timer(const Duration(seconds: 25), () {
       if (player.state.duration == Duration.zero) {
@@ -861,8 +883,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await mpv.setProperty('cache-pause-wait', '1');
       // Read ahead over the network so seeks inside the buffer are instant.
       await mpv.setProperty('cache', 'yes');
-      await mpv.setProperty('demuxer-max-bytes', '256MiB');
-      await mpv.setProperty('demuxer-max-back-bytes', '128MiB');
+      // (phones get a smaller read-ahead: iOS stops apps that use too much memory)
+      await mpv.setProperty('demuxer-max-bytes', _phone ? '64MiB' : '256MiB');
+      await mpv.setProperty('demuxer-max-back-bytes', _phone ? '32MiB' : '128MiB');
       await mpv.setProperty('demuxer-readahead-secs', '60');
       // Jump to the nearest keyframe: much faster seeks.
       await mpv.setProperty('hr-seek', 'no');
@@ -1217,6 +1240,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 ),
               ),
             ),
+
+            // Phones: when a video doesn't start, what the player is doing (to fix it).
+            if (_showPhoneLog)
+              Positioned(
+                left: 40,
+                right: 40,
+                bottom: 40,
+                child: IgnorePointer(
+                  child: Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(color: const Color(0xE612151B), borderRadius: BorderRadius.circular(20)),
+                    child: Text(
+                      [
+                        "Why isn't it playing? (screenshot this)",
+                        '${_server ? "Server's version" : 'Original file'} · '
+                            '${(widget.item['Container'] ?? '?')} · '
+                            'length ${player.state.duration.inSeconds}s · '
+                            'picture ${player.state.width ?? 0}x${player.state.height ?? 0} · '
+                            'buffering ${player.state.buffering} · playing ${player.state.playing} · '
+                            'buffered ${player.state.buffer.inSeconds}s',
+                        ..._phoneLog,
+                      ].join('\n'),
+                      style: const TextStyle(fontSize: 22, height: 1.35, color: Color(0xFFD3D8E0), fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+              ),
 
             // Loading spinner while the video starts or buffers.
             Positioned.fill(

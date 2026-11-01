@@ -19,7 +19,7 @@ import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'syncplay.dart' show SyncPlay;
-import 'ui.dart' show isDesktop, toggleFullScreen, keyboardInset, kBg;
+import 'ui.dart' show isDesktop, toggleFullScreen, keyboardInset;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -135,10 +135,9 @@ class _TestAppState extends State<TestApp> {
 
 // The new screen fades in over the first 60% of the transition (about 180 ms), then costs
 // nothing extra: a fully visible screen is drawn normally.
-// Phones and tablets: keep everything inside the safe area (away from the Dynamic Island,
-// the rounded corners and the home bar), and take the on-screen keyboard out of the layout so
-// screens aren't squeezed and rescaled when it opens (TvCanvas slides up instead, see
-// keyboardInset). Computers are unchanged.
+// Phones and tablets: the app fills the whole screen (edge to edge, no black borders), and
+// the on-screen keyboard is taken out of the layout so screens aren't squeezed and rescaled
+// when it opens (TvCanvas slides up instead, see keyboardInset). Computers are unchanged.
 Widget _phoneFrame(BuildContext context, Widget child) {
   if (isDesktop) return child;
   final mq = MediaQuery.of(context);
@@ -146,19 +145,7 @@ Widget _phoneFrame(BuildContext context, Widget child) {
   if (keyboardInset.value != inset) {
     WidgetsBinding.instance.addPostFrameCallback((_) => keyboardInset.value = inset);
   }
-  return ColoredBox(
-    color: kBg,
-    child: Padding(
-      padding: mq.padding,
-      child: MediaQuery(
-        data: mq
-            .removePadding(removeLeft: true, removeTop: true, removeRight: true, removeBottom: true)
-            .removeViewPadding(removeLeft: true, removeTop: true, removeRight: true, removeBottom: true)
-            .removeViewInsets(removeBottom: true),
-        child: child,
-      ),
-    ),
-  );
+  return MediaQuery(data: mq.removeViewInsets(removeBottom: true), child: child);
 }
 
 class _QuickFade extends PageTransitionsBuilder {
