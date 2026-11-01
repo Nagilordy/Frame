@@ -13,12 +13,16 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'gamepad.dart' show PadHint, PadHints, PadButton, padActive, fullScreenHint;
-import 'ui.dart' show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent, phoneSidewaysOnly;
+import 'ui.dart'
+    show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent,
+        phoneSidewaysOnly, kFg, kSoft, kPlaceholder, runtimeMinutes;
+import 'images.dart' show netImage;
 import 'main.dart' show Jellyfin;
 import 'banners.dart' show showBanner, bannerIcon;
 import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
 import 'perf.dart' show perfLog;
 import 'tracks.dart';
+import 'phone.dart';
 
 // ---------- Look (same palette as the home screen) ----------
 
@@ -1069,7 +1073,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Duration? _skipTarget;
   DateTime _skipAt = DateTime(0);
 
-  void _skip(Duration by) {
+  void _skip(Duration by, {bool show = true}) {
     final duration = player.state.duration;
     final recent = DateTime.now().difference(_skipAt) < const Duration(milliseconds: 1500);
     var target = (recent ? _skipTarget ?? player.state.position : player.state.position) + by;
@@ -1084,7 +1088,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     } else {
       player.seek(target);
     }
-    _showControls();
+    if (show) _showControls();
   }
 
   // Jumps between the Back button, progress bar and buttons, keeping the controls up.
@@ -1277,19 +1281,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
           child: Stack(children: [
             // The video itself, with no built-in controls.
             Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _controls ? _hideControls() : _showControls(focusPlay: true),
-                // Double-click for full screen on PC only, so taps on the phone stay instant.
-                onDoubleTap: isDesktop ? toggleFullScreen : null,
-                child: Video(
-                  controller: controller,
-                  controls: NoVideoControls,
-                  fill: Colors.black,
-                  // Subtitles are drawn by mpv onto the video itself, so the plain text version is off.
-                  subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
-                ),
-              ),
+              child: _phone
+                  ? _phoneGestures(_video())
+                  : GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => _controls ? _hideControls() : _showControls(focusPlay: true),
+                      // Double-click for full screen on PC only, so taps on the phone stay instant.
+                      onDoubleTap: isDesktop ? toggleFullScreen : null,
+                      child: _video(),
+                    ),
             ),
 
             // Phones: when a video doesn't start, what the player is doing (to fix it).
@@ -1352,21 +1352,813 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   },
                   child: _chrome
                       ? Stack(children: [
-                          _topBar(title, episodeLine),
-                          _bottomBar(),
+                          if (_phone) ...[
+                            _phoneTopBar(title, episodeLine),
+                            _phoneCenter(),
+                            _phoneBottomBar(),
+                          ] else ...[
+                            _topBar(title, episodeLine),
+                            _bottomBar(),
+                          ],
                         ])
                       : const SizedBox.shrink(),
                 ),
               ),
             ),
 
-            if (_next != null) _upNextCard(),
-            if (_info) _infoBox(),
-            if (_panel != _Panel.none) _trackPanel(),
+            if (_phone) ..._phoneOverlays(),
+            if (_next != null) _phone ? _phoneUpNext() : _upNextCard(),
+            if (_info) _phone ? _phoneInfo() : _infoBox(),
+            if (_panel != _Panel.none) _phone ? _phonePanel() : _trackPanel(),
+            if (_subEdit) _phoneSubEdit(),
             if (_failure != null) _failureBox(),
           ]),
         ),
       ),
+      ),
+    );
+  }
+
+  // The video itself, with no built-in controls. Pinch on a phone fills the screen.
+  Widget _video() => Video(
+        controller: controller,
+        controls: NoVideoControls,
+        fill: Colors.black,
+        fit: _fill ? BoxFit.cover : BoxFit.contain,
+        // Subtitles are drawn by mpv onto the video itself, so the plain text version is off.
+        subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
+      );
+
+  // ---------- Phones: touch and phone-sized controls ----------
+  //
+  // Tap shows or hides the controls. Double-tap the left or right third to go back 10 s or
+  // forward 30 s (keep tapping to add more), the middle to play or pause. Press and hold for
+  // 2× speed while held. Swipe down to close. Pinch to fill the screen or fit the video.
+  // The controls, menus, info and Up next card are sized for a phone held sideways.
+
+  bool _fill = false;
+  double _speed = 1.0;
+  bool _held = false; // 2× while the finger stays down
+  int _tapSide = 0; // -1 left, 1 right: the double-tap skip showing right now
+  int _tapTotal = 0;
+  Timer? _tapTimer;
+  Offset? _doubleTapAt;
+  double _dragDown = 0;
+  bool _pinching = false;
+  bool _subEdit = false; // Size & position for subtitles, over the video
+  int _infoTab = 0; // 0 episode, 1 the show, 2 playback info
+  dynamic _series;
+
+  EdgeInsets get _phonePad {
+    final p = MediaQuery.paddingOf(context);
+    return EdgeInsets.fromLTRB(p.left > 44 ? p.left : 44, p.top, p.right > 44 ? p.right : 44, p.bottom);
+  }
+
+  Widget _phoneGestures(Widget video) => LayoutBuilder(builder: (context, box) {
+        int sideOf(Offset p) => p.dx < box.maxWidth / 3 ? -1 : (p.dx > box.maxWidth * 2 / 3 ? 1 : 0);
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: (d) {
+            // While a double-tap skip shows, more taps on the same side add more.
+            final side = sideOf(d.localPosition);
+            if (_tapTimer?.isActive == true && side != 0 && side == _tapSide) {
+              _phoneSkipTap(side);
+              return;
+            }
+            _controls ? _hideControls() : _showControls();
+          },
+          onDoubleTapDown: (d) => _doubleTapAt = d.localPosition,
+          onDoubleTap: () {
+            final side = sideOf(_doubleTapAt ?? Offset(box.maxWidth / 2, 0));
+            if (side == 0) {
+              _togglePlay();
+            } else {
+              _phoneSkipTap(side);
+            }
+          },
+          onLongPressStart: (_) => _phoneHold(true),
+          onLongPressEnd: (_) => _phoneHold(false),
+          onScaleStart: (d) {
+            _dragDown = 0;
+            _pinching = d.pointerCount > 1;
+          },
+          onScaleUpdate: (d) {
+            if (d.pointerCount > 1) {
+              _pinching = true;
+              if (d.scale > 1.15 && !_fill) {
+                HapticFeedback.selectionClick();
+                setState(() => _fill = true);
+              } else if (d.scale < 0.87 && _fill) {
+                HapticFeedback.selectionClick();
+                setState(() => _fill = false);
+              }
+            } else if (!_pinching) {
+              _dragDown += d.focalPointDelta.dy;
+            }
+          },
+          onScaleEnd: (_) {
+            if (!_pinching && _dragDown > 120) Navigator.of(context).maybePop();
+            _pinching = false;
+            _dragDown = 0;
+          },
+          child: video,
+        );
+      });
+
+  void _phoneSkipTap(int side) {
+    HapticFeedback.selectionClick();
+    final step = side < 0 ? _back : _forward;
+    final adding = _tapTimer?.isActive == true && _tapSide == side;
+    setState(() {
+      _tapTotal = adding ? _tapTotal + step.inSeconds : step.inSeconds;
+      _tapSide = side;
+    });
+    _tapTimer?.cancel();
+    _tapTimer = Timer(const Duration(milliseconds: 900), () {
+      if (mounted) setState(() => _tapSide = 0);
+    });
+    _skip(side < 0 ? -step : step, show: false);
+  }
+
+  // Press and hold: 2× while held (not in a watch party, where speed is shared).
+  void _phoneHold(bool on) {
+    if (_room != null || _held == on) return;
+    if (on) HapticFeedback.mediumImpact();
+    setState(() => _held = on);
+    player.setRate(on ? 2.0 : _speed);
+  }
+
+  void _setSpeed(double speed) {
+    setState(() => _speed = speed);
+    player.setRate(speed);
+  }
+
+  // The double-tap ripple on one side, and the 2× pill while holding.
+  List<Widget> _phoneOverlays() => [
+        if (_tapSide != 0)
+          Positioned(
+            top: 0,
+            bottom: 0,
+            left: _tapSide < 0 ? 0 : null,
+            right: _tapSide > 0 ? 0 : null,
+            width: MediaQuery.sizeOf(context).width * 0.38,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0x24F4F5F7),
+                  borderRadius: _tapSide < 0
+                      ? const BorderRadius.horizontal(right: Radius.circular(400))
+                      : const BorderRadius.horizontal(left: Radius.circular(400)),
+                ),
+                alignment: Alignment.center,
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(_tapSide < 0 ? Icons.fast_rewind_rounded : Icons.fast_forward_rounded, size: 36, color: _fg),
+                  const SizedBox(height: 6),
+                  Text('${_tapSide < 0 ? '−' : '+'}$_tapTotal s', style: phoneText(16, weight: FontWeight.w700)),
+                ]),
+              ),
+            ),
+          ),
+        if (_held)
+          Positioned(
+            top: _phonePad.top + 16,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  height: 36,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(color: const Color(0xD9151920), borderRadius: BorderRadius.circular(18)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.fast_forward_rounded, size: 18, color: _fg),
+                    const SizedBox(width: 6),
+                    Text('2×', style: phoneText(15, weight: FontWeight.w700)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+      ];
+
+  Widget _round(IconData icon, VoidCallback onTap, String label, {double size = 44, bool white = false}) => Semantics(
+        button: true,
+        label: label,
+        child: GestureDetector(
+          onTap: () {
+            phoneTap();
+            onTap();
+          },
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(color: white ? const Color(0xEBF4F5F7) : const Color(0x7306080B), shape: BoxShape.circle),
+            child: Icon(icon, size: size * 0.48, color: white ? _bg : _fg),
+          ),
+        ),
+      );
+
+  Widget _phoneTopBar(String title, String episodeLine) {
+    final m = _phonePad;
+    final quality = _qualityLine(widget.item);
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 0,
+      child: Container(
+        padding: EdgeInsets.fromLTRB(m.left, m.top + 14, m.right, 40),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.black.withOpacity(0.75), Colors.black.withOpacity(0)],
+          ),
+        ),
+        child: Row(children: [
+          _round(Icons.arrow_back_ios_new_rounded, () => Navigator.of(context).maybePop(), 'Back'),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneTitle(17)),
+              if (episodeLine.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text(episodeLine,
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(13, weight: FontWeight.w500, color: _soft)),
+              ],
+            ]),
+          ),
+          if (quality.isNotEmpty) ...[
+            const SizedBox(width: 12),
+            Text(quality, style: phoneText(12, color: _soft)),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  Widget _phoneCenter() => Positioned.fill(
+        child: Center(
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            _round(Icons.replay_10_rounded, () => _skip(-_back), 'Back 10 seconds', size: 56),
+            const SizedBox(width: 40),
+            StreamBuilder<bool>(
+              stream: player.stream.playing,
+              initialData: player.state.playing,
+              builder: (_, snap) => _round(snap.data == true ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  _togglePlay, snap.data == true ? 'Pause' : 'Play',
+                  size: 76, white: true),
+            ),
+            const SizedBox(width: 40),
+            _round(Icons.forward_30_rounded, () => _skip(_forward), 'Forward 30 seconds', size: 56),
+          ]),
+        ),
+      );
+
+  // What's chosen now, for the buttons under the timeline.
+  String _audioNow() {
+    try {
+      final t = player.state.track.audio;
+      if (_server || t.id == 'auto' || t.id == 'no') return '';
+      return _trackLabel(t.id, t.title, t.language, type: 'Audio').split(' · ').first;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  String _subsNow() {
+    try {
+      if (_server) return (_serverSub == null && _serverTextSub == null) ? 'Off' : '';
+      final t = player.state.track.subtitle;
+      if (t.id == 'no') return 'Off';
+      if (t.id == 'auto') return '';
+      return _trackLabel(t.id, t.title, t.language, type: 'Subtitle').split(' · ').first;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Widget _phonePill(String label, String value, VoidCallback onTap) => GestureDetector(
+        onTap: () {
+          phoneTap();
+          onTap();
+        },
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(color: const Color(0xD92C313B), borderRadius: BorderRadius.circular(22)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(label, style: phoneText(13)),
+            if (value.isNotEmpty)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 130),
+                child: Text(' · $value',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: phoneText(13, weight: FontWeight.w500, color: _muted)),
+              ),
+          ]),
+        ),
+      );
+
+  Widget _phoneBottomBar() {
+    final m = _phonePad;
+    final chapters = ((widget.item['Chapters'] as List?) ?? const [])
+        .map((c) => (
+              at: Duration(microseconds: ((c['StartPositionTicks'] ?? 0) as int) ~/ 10),
+              name: (c['Name'] ?? '').toString(),
+            ))
+        .toList();
+    final playback = _mode == 'auto' ? 'Automatic' : (_mode == 'server' ? 'Server' : 'Original');
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Container(
+        padding: EdgeInsets.fromLTRB(m.left, 60, m.right, m.bottom + 12),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.bottomCenter,
+            end: Alignment.topCenter,
+            colors: [Colors.black.withOpacity(0.85), Colors.black.withOpacity(0)],
+          ),
+        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          StreamBuilder<Duration>(
+            stream: player.stream.position,
+            initialData: player.state.position,
+            builder: (_, snap) {
+              final pos = snap.data ?? Duration.zero;
+              final dur = player.state.duration;
+              final left = dur > pos ? dur - pos : Duration.zero;
+              return Row(children: [
+                SizedBox(width: 54, child: Text(_clock(pos), style: phoneText(13, color: _soft))),
+                Expanded(
+                  child: _PhoneScrubber(
+                    position: pos,
+                    duration: dur,
+                    chapters: chapters,
+                    onDrag: () => _hideTimer?.cancel(),
+                    onSeek: (to) {
+                      _lastSeek = DateTime.now();
+                      final room = _room;
+                      if (room != null) {
+                        room.seek(to.inMicroseconds / 1e6);
+                      } else {
+                        player.seek(to);
+                      }
+                      _showControls();
+                    },
+                  ),
+                ),
+                SizedBox(
+                  width: 62,
+                  child: Text('-${_clock(left)}', textAlign: TextAlign.right, style: phoneText(13, color: _soft)),
+                ),
+              ]);
+            },
+          ),
+          const SizedBox(height: 10),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              _phonePill('Audio', _audioNow(), () => _openPanel(_Panel.audio)),
+              const SizedBox(width: 8),
+              _phonePill('Subtitles', _subsNow(), () => _openPanel(_Panel.subtitles)),
+              const SizedBox(width: 8),
+              _phonePill('Playback', _speed == 1.0 ? playback : '$playback · ${_speedText(_speed)}',
+                  () => _openPanel(_Panel.playback)),
+              const SizedBox(width: 8),
+              _phonePill('Info', '', _toggleInfo),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  static String _speedText(double s) => '${s == s.roundToDouble() ? s.toInt() : s}×';
+
+  // The choices in the Audio, Subtitles and Playback menus (same as the TV panel).
+  List<({String label, String note, bool selected, VoidCallback onSelect})> _choices() {
+    final out = <({String label, String note, bool selected, VoidCallback onSelect})>[];
+    void add(String label, bool selected, VoidCallback onSelect, {String note = ''}) =>
+        out.add((label: label, note: note, selected: selected, onSelect: onSelect));
+
+    if (_panel == _Panel.playback) {
+      add('Automatic', _mode == 'auto', () => _setMode('auto'),
+          note: "The original, the server's version if it struggles");
+      add('Original file · best quality', _mode == 'original', () => _setMode('original'));
+      add('Converted by the server · smoothest', _mode == 'server', () => _setMode('server'));
+    } else if (_server && _panel == _Panel.audio) {
+      final audio = _streams('Audio');
+      final current = _serverAudio ?? (audio.firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index']);
+      for (final a in audio) {
+        final index = (a['Index'] ?? -1) as int;
+        add(_streamLabel(a), index == current, () => _chooseServerAudio(index));
+      }
+    } else if (_server && _panel == _Panel.subtitles) {
+      add('Off', _serverSub == null && _serverTextSub == null, () => _chooseServerSubtitle(null));
+      for (final st in _streams('Subtitle')) {
+        final index = (st['Index'] ?? -1) as int;
+        final text = st['IsTextSubtitleStream'] == true;
+        add(_streamLabel(st), index == _serverSub || index == _serverTextSub, () => _chooseServerSubtitle(st),
+            note: text ? '' : 'Drawn in by the server');
+      }
+    } else if (_panel == _Panel.audio) {
+      final current = player.state.track.audio;
+      for (final t in player.state.tracks.audio) {
+        if (t.id == 'no') continue;
+        add(_trackLabel(t.id, t.title, t.language, type: 'Audio'), t == current, () {
+          player.setAudioTrack(t);
+          _tracks.remember('audio', _describeAudio(t));
+        });
+      }
+    } else {
+      final current = player.state.track.subtitle;
+      for (final t in player.state.tracks.subtitle) {
+        add(_trackLabel(t.id, t.title, t.language, type: 'Subtitle'), t == current, () {
+          _setSubtitle(t);
+          if (t.id == 'no') {
+            _tracks.rememberSubsOff();
+          } else if (int.tryParse(t.id) != null) {
+            _tracks.remember('sub', _describeSub(t));
+          }
+        });
+      }
+      final external = ((widget.item['MediaStreams'] as List?) ?? [])
+          .where((s) => s['Type'] == 'Subtitle' && s['IsExternal'] == true);
+      for (final s in external) {
+        add('${s['DisplayTitle'] ?? s['Language'] ?? 'Subtitle'}', false, () {
+          _setSubtitle(_externalTrack(s));
+          _tracks.remember('sub', TrackPrefs.describeStream(s));
+        }, note: 'Separate file');
+      }
+    }
+    return out;
+  }
+
+  Widget _chip(String label, bool on, VoidCallback onTap) => GestureDetector(
+        onTap: () {
+          phoneTap();
+          onTap();
+        },
+        child: Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: on ? _fg : const Color(0xBF4A4E57),
+            borderRadius: BorderRadius.circular(17),
+          ),
+          child: Text(label, style: phoneText(13, weight: FontWeight.w700, color: on ? _bg : _fg)),
+        ),
+      );
+
+  // Audio, Subtitles or Playback: a panel from the right. Tap a choice to use it.
+  Widget _phonePanel() {
+    final m = _phonePad;
+    final choices = _choices();
+    final title = _panel == _Panel.playback ? 'Playback' : (_panel == _Panel.audio ? 'Audio' : 'Subtitles');
+    return Positioned.fill(
+      child: Stack(children: [
+        Positioned.fill(
+          child: GestureDetector(onTap: _closePanel, child: Container(color: Colors.black.withOpacity(0.35))),
+        ),
+        Positioned(
+          top: 0,
+          bottom: 0,
+          right: 0,
+          width: 360 + m.right,
+          child: GestureDetector(
+            onHorizontalDragEnd: (d) {
+              if ((d.primaryVelocity ?? 0) > 300) _closePanel();
+            },
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Color(0xF7151920),
+                borderRadius: BorderRadius.horizontal(left: Radius.circular(24)),
+              ),
+              padding: EdgeInsets.fromLTRB(22, m.top + 16, m.right, m.bottom + 12),
+              child: Material(
+                type: MaterialType.transparency,
+                child: ListView(padding: EdgeInsets.zero, children: [
+                  Row(children: [
+                    Expanded(child: Text(title, style: phoneTitle(20))),
+                    if (_panel == _Panel.subtitles)
+                      _chip('Size & position', false, () {
+                        setState(() {
+                          _panel = _Panel.none;
+                          _subEdit = true;
+                          _controls = false;
+                        });
+                      }),
+                  ]),
+                  if (_panel == _Panel.playback) ...[
+                    const SizedBox(height: 4),
+                    Text(_server ? 'Now: the version your server converts' : 'Now: the original file, straight from the NAS',
+                        style: phoneText(12, color: _muted)),
+                  ],
+                  const SizedBox(height: 14),
+                  if (choices.isEmpty)
+                    Text('None in this file.', style: phoneText(15, color: _muted))
+                  else
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(16),
+                      child: ColoredBox(
+                        color: const Color(0x8C2C313B),
+                        child: Column(children: [
+                          for (final c in choices)
+                            InkWell(
+                              onTap: () {
+                                phoneTap();
+                                c.onSelect();
+                                _closePanel();
+                              },
+                              child: Container(
+                                color: c.selected ? _fg : Colors.transparent,
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                child: Row(children: [
+                                  Expanded(
+                                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                      Text(c.label,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: phoneText(15,
+                                              weight: c.selected ? FontWeight.w700 : FontWeight.w600,
+                                              color: c.selected ? _bg : _fg)),
+                                      if (c.note.isNotEmpty)
+                                        Text(c.note,
+                                            style: phoneText(12, color: c.selected ? const Color(0xFF3B414C) : _muted)),
+                                    ]),
+                                  ),
+                                  if (c.selected) const Icon(Icons.check_rounded, size: 20, color: _bg),
+                                ]),
+                              ),
+                            ),
+                        ]),
+                      ),
+                    ),
+                  if (_panel == _Panel.playback && _room == null) ...[
+                    const SizedBox(height: 18),
+                    Text('SPEED', style: phoneText(11, weight: FontWeight.w700, color: _muted).copyWith(letterSpacing: 1)),
+                    const SizedBox(height: 8),
+                    Wrap(spacing: 6, runSpacing: 6, children: [
+                      for (final s in const [0.75, 1.0, 1.25, 1.5, 2.0])
+                        _chip(_speedText(s), _speed == s, () => _setSpeed(s)),
+                    ]),
+                  ],
+                  if (_panel != _Panel.playback) ...[
+                    const SizedBox(height: 12),
+                    Text('Your choice is remembered for the whole show.', style: phoneText(12, color: _muted)),
+                  ],
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // Subtitles: size and position over the video, changes show live on the picture.
+  Widget _phoneSubEdit() {
+    final m = _phonePad;
+    void done() => setState(() => _subEdit = false);
+    final height = 100 - _subPos; // 0 = bottom of the picture
+    return Positioned(
+      left: m.left,
+      right: m.right,
+      top: m.top + 12,
+      child: Material(
+        type: MaterialType.transparency,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          decoration: BoxDecoration(color: const Color(0xF0151920), borderRadius: BorderRadius.circular(18)),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              Expanded(child: Text('Subtitle size & position', style: phoneTitle(16))),
+              _chip('Reset', false, () => _changeSubStyle(scale: 1.0, pos: 100, box: false)),
+              const SizedBox(width: 8),
+              _chip('Done', true, done),
+            ]),
+            const SizedBox(height: 8),
+            Row(children: [
+              _chip('Bottom', _subPos == 100, () => _changeSubStyle(pos: 100)),
+              const SizedBox(width: 6),
+              _chip('Raised', _subPos == 92, () => _changeSubStyle(pos: 92)),
+              const SizedBox(width: 6),
+              _chip('Higher', _subPos == 80, () => _changeSubStyle(pos: 80)),
+              const SizedBox(width: 6),
+              _chip('Box', _subBox, () => _changeSubStyle(box: !_subBox)),
+            ]),
+            Row(children: [
+              SizedBox(width: 54, child: Text('Size', style: phoneText(13, color: _muted))),
+              Expanded(
+                child: Slider(
+                  value: _subScale.clamp(0.5, 2.0).toDouble(),
+                  min: 0.5,
+                  max: 2.0,
+                  divisions: 15,
+                  activeColor: _fg,
+                  inactiveColor: const Color(0x40F4F5F7),
+                  onChanged: (v) => _changeSubStyle(scale: v),
+                ),
+              ),
+              SizedBox(width: 44, child: Text('${(_subScale * 100).round()}%', style: phoneText(13))),
+            ]),
+            Row(children: [
+              SizedBox(width: 54, child: Text('Height', style: phoneText(13, color: _muted))),
+              Expanded(
+                child: Slider(
+                  value: height.clamp(0, 80).toDouble(),
+                  min: 0,
+                  max: 80,
+                  divisions: 80,
+                  activeColor: _fg,
+                  inactiveColor: const Color(0x40F4F5F7),
+                  onChanged: (v) => _changeSubStyle(pos: 100 - v.round()),
+                ),
+              ),
+              SizedBox(width: 44, child: Text(height == 0 ? 'Bottom' : '+$height', style: phoneText(13))),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _loadSeries() async {
+    final id = widget.item['SeriesId'];
+    if (id == null || _series != null) return;
+    try {
+      final s = await widget.jf.item(id.toString());
+      if (mounted) setState(() => _series = s);
+    } catch (_) {}
+  }
+
+  // About this episode: the episode, the show, playback info; the next episode on the right.
+  Widget _phoneInfo() {
+    final m = _phonePad;
+    final item = widget.item;
+    final isEpisode = item['Type'] == 'Episode';
+    if (isEpisode && _infoTab == 1) _loadSeries();
+    final tabs = [isEpisode ? 'Episode' : 'About', if (isEpisode) 'The show', 'Playback info'];
+    final tab = _infoTab.clamp(0, tabs.length - 1);
+    final techTab = tab == tabs.length - 1;
+    final mins = runtimeMinutes(item);
+    final aired = DateTime.tryParse((item['PremiereDate'] ?? '').toString());
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    Widget body;
+    if (techTab) {
+      body = Text(_stats.isEmpty ? 'Reading…' : _stats, style: phoneText(13, weight: FontWeight.w500, color: _soft, height: 1.6));
+    } else if (tab == 1) {
+      final s = _series ?? const {};
+      final genres = ((s['Genres'] as List?) ?? const []).take(3).join(', ');
+      body = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(item['SeriesName']?.toString() ?? '', style: phoneTitle(22)),
+        const SizedBox(height: 4),
+        Text([s['ProductionYear']?.toString() ?? '', s['OfficialRating']?.toString() ?? '', genres]
+                .where((x) => x.isNotEmpty)
+                .join(' · '),
+            style: phoneText(13, color: _muted)),
+        const SizedBox(height: 8),
+        Text((s['Overview'] ?? (_series == null ? 'Loading…' : '')).toString(),
+            style: phoneText(14, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.5)),
+      ]);
+    } else {
+      body = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (isEpisode)
+          Text('${item['SeriesName'] ?? ''} · ${_episodeTitle(item).split(' · ').take(2).join(' · ')}',
+              style: phoneTitle(14).copyWith(color: _soft)),
+        const SizedBox(height: 4),
+        Text(item['Name']?.toString() ?? '', style: phoneTitle(22)),
+        const SizedBox(height: 4),
+        Text(
+            [
+              if (mins > 0) '$mins min',
+              if (aired != null) 'Aired ${months[aired.month - 1]} ${aired.day}, ${aired.year}',
+            ].join(' · '),
+            style: phoneText(13, color: _muted)),
+        const SizedBox(height: 8),
+        Text((item['Overview'] ?? '').toString(),
+            style: phoneText(14, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.5)),
+      ]);
+    }
+
+    final next = _next;
+    return Positioned.fill(
+      child: GestureDetector(
+        onTap: _toggleInfo,
+        child: Container(
+          color: const Color(0xD106080B),
+          padding: EdgeInsets.fromLTRB(m.left, m.top + 16, m.right, m.bottom + 16),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  for (var i = 0; i < tabs.length; i++) ...[
+                    _chip(tabs[i], i == tab, () => setState(() => _infoTab = i)),
+                    const SizedBox(width: 6),
+                  ],
+                  const Spacer(),
+                  _round(Icons.close_rounded, _toggleInfo, 'Close', size: 34),
+                ]),
+                const SizedBox(height: 12),
+                // Taps inside the text don't close the info.
+                Expanded(child: GestureDetector(onTap: () {}, child: SingleChildScrollView(child: body))),
+              ]),
+            ),
+            if (next != null) ...[
+              const SizedBox(width: 24),
+              SizedBox(
+                width: 200,
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const SizedBox(height: 44),
+                  Text('NEXT EPISODE', style: phoneText(11, weight: FontWeight.w700, color: _muted).copyWith(letterSpacing: 1)),
+                  const SizedBox(height: 8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      width: 200,
+                      height: 112,
+                      child: netImage(widget.jf.image(next['Id'].toString(), 'Primary', maxWidth: phoneDecode(context, 200)),
+                          cacheWidth: phoneDecode(context, 200),
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder)),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_episodeTitle(next), maxLines: 2, overflow: TextOverflow.ellipsis, style: phoneText(14, weight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  PhoneButton(label: 'Play next', height: 36, onTap: _playNext),
+                ]),
+              ),
+            ],
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // Up next over the credits: the next episode, Play in N (it starts by itself at the end),
+  // and Watch credits to hide the card.
+  Widget _phoneUpNext() {
+    final m = _phonePad;
+    return Positioned(
+      right: m.right,
+      bottom: m.bottom + (_controls ? 120 : 20),
+      child: StreamBuilder<Duration>(
+        stream: player.stream.position,
+        initialData: player.state.position,
+        builder: (_, snap) {
+          final at = _upNextAt(snap.data ?? Duration.zero);
+          final next = _next;
+          if (at == null || next == null || _panel != _Panel.none) return const SizedBox.shrink();
+          final (left, _) = at;
+          final thumbW = phoneDecode(context, 132);
+          return Container(
+            width: 380,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xF2151920),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: const [BoxShadow(color: Color(0x80000000), blurRadius: 40, offset: Offset(0, 16))],
+            ),
+            child: Row(children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: 132,
+                  height: 74,
+                  child: netImage(widget.jf.image(next['Id'].toString(), 'Primary', maxWidth: thumbW),
+                      cacheWidth: thumbW,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('UP NEXT · ${_episodeTitle(next).split(' · ').take(2).join(' · ')}',
+                      style: phoneText(11, weight: FontWeight.w700, color: _muted).copyWith(letterSpacing: 0.8)),
+                  const SizedBox(height: 2),
+                  Text(next['Name']?.toString() ?? '',
+                      maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(15, weight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    PhoneButton(primary: true, label: 'Play in ${left.ceil()}', icon: Icons.play_arrow_rounded, height: 36, onTap: _playNext),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: PhoneButton(
+                          label: 'Watch credits', height: 36, onTap: () => setState(() => _nextDismissed = true)),
+                    ),
+                  ]),
+                ]),
+              ),
+            ]),
+          );
+        },
       ),
     );
   }
@@ -1607,7 +2399,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _changeSubStyle({double? scale, int? pos, bool? box}) {
     setState(() {
       if (scale != null) _subScale = (scale.clamp(0.5, 2.0) * 10).roundToDouble() / 10;
-      if (pos != null) _subPos = pos.clamp(40, 100).toInt();
+      if (pos != null) _subPos = pos.clamp(20, 100).toInt();
       if (box != null) _subBox = box;
     });
     _applySubStyle(save: true);
@@ -2053,5 +2845,147 @@ class _ProgressBarState extends State<_ProgressBar> {
         }),
       ),
     );
+  }
+}
+
+// ---------- Phones: the timeline you drag with a finger ----------
+//
+// Tap anywhere on it to jump there, or drag: it grows thicker, a bubble above your finger shows
+// the time and chapter, and you feel a light tap at each chapter mark. Seeks when you let go.
+
+class _PhoneScrubber extends StatefulWidget {
+  const _PhoneScrubber({
+    required this.position,
+    required this.duration,
+    required this.chapters,
+    required this.onSeek,
+    this.onDrag,
+  });
+
+  final Duration position;
+  final Duration duration;
+  final List<({Duration at, String name})> chapters;
+  final void Function(Duration to) onSeek;
+  final VoidCallback? onDrag;
+
+  @override
+  State<_PhoneScrubber> createState() => _PhoneScrubberState();
+}
+
+class _PhoneScrubberState extends State<_PhoneScrubber> {
+  double? _drag; // 0..1 while the finger is down
+  int _chapter = -1;
+
+  double get _played {
+    final total = widget.duration.inMilliseconds;
+    if (total <= 0) return 0;
+    return (widget.position.inMilliseconds / total).clamp(0.0, 1.0);
+  }
+
+  Duration _at(double f) => Duration(milliseconds: (widget.duration.inMilliseconds * f.clamp(0.0, 1.0)).round());
+
+  int _chapterAt(Duration d) {
+    var found = -1;
+    for (var i = 0; i < widget.chapters.length; i++) {
+      if (widget.chapters[i].at <= d) found = i;
+    }
+    return found;
+  }
+
+  void _move(double f) {
+    final c = _chapterAt(_at(f));
+    if (_drag != null && c != _chapter) HapticFeedback.selectionClick();
+    _chapter = c;
+    setState(() => _drag = f);
+    widget.onDrag?.call();
+  }
+
+  static String _clock(Duration d) {
+    final h = d.inHours, m = d.inMinutes % 60, s = d.inSeconds % 60;
+    return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}' : '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dragging = _drag != null;
+    final f = _drag ?? _played;
+    final total = widget.duration.inMilliseconds;
+    return LayoutBuilder(builder: (context, box) {
+      final w = box.maxWidth;
+      double toF(double dx) => (dx / w).clamp(0.0, 1.0);
+      final chapter = dragging ? _chapterAt(_at(f)) : -1;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapUp: (d) => widget.onSeek(_at(toF(d.localPosition.dx))),
+        onHorizontalDragStart: (d) {
+          HapticFeedback.selectionClick();
+          _chapter = _chapterAt(_at(toF(d.localPosition.dx)));
+          _move(toF(d.localPosition.dx));
+        },
+        onHorizontalDragUpdate: (d) => _move(toF(d.localPosition.dx)),
+        onHorizontalDragEnd: (_) {
+          final to = _drag;
+          setState(() => _drag = null);
+          if (to != null) widget.onSeek(_at(to));
+        },
+        child: SizedBox(
+          height: 44,
+          child: Stack(clipBehavior: Clip.none, alignment: Alignment.centerLeft, children: [
+            // Track, played part and chapter marks.
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              height: dragging ? 8 : 4,
+              decoration: BoxDecoration(color: const Color(0x40F4F5F7), borderRadius: BorderRadius.circular(4)),
+            ),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width: w * f,
+              height: dragging ? 8 : 4,
+              decoration: BoxDecoration(color: kFg, borderRadius: BorderRadius.circular(4)),
+            ),
+            if (total > 0)
+              for (final c in widget.chapters)
+                if (c.at > Duration.zero)
+                  Positioned(
+                    left: w * (c.at.inMilliseconds / total).clamp(0.0, 1.0) - 1,
+                    child: Container(width: 2, height: dragging ? 8 : 4, color: const Color(0x9906080B)),
+                  ),
+            // The thumb.
+            Positioned(
+              left: w * f - (dragging ? 14 : 7),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 120),
+                width: dragging ? 28 : 14,
+                height: dragging ? 28 : 14,
+                decoration: BoxDecoration(
+                  color: kFg,
+                  shape: BoxShape.circle,
+                  boxShadow: dragging ? const [BoxShadow(color: Color(0x33F4F5F7), spreadRadius: 8)] : const [],
+                ),
+              ),
+            ),
+            // Time (and chapter) above the finger while dragging.
+            if (dragging)
+              Positioned(
+                left: (w * f - 80).clamp(-40.0, w - 120).toDouble(),
+                bottom: 40,
+                child: Container(
+                  width: 160,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(color: const Color(0xF2151920), borderRadius: BorderRadius.circular(12)),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text(_clock(_at(f)), style: phoneText(18, weight: FontWeight.w700)),
+                    if (chapter >= 0 && widget.chapters[chapter].name.isNotEmpty)
+                      Text(widget.chapters[chapter].name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: phoneText(12, color: kSoft)),
+                  ]),
+                ),
+              ),
+          ]),
+        ),
+      );
+    });
   }
 }

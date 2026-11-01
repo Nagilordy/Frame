@@ -14,6 +14,21 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: the player made for touch (stage 4).** Video still plays sideways.
+  - Tap shows or hides the controls. Double-tap the left or right side: back 10 s or forward
+    30 s, keep tapping to add more (shown on screen). Double-tap the middle: play or pause.
+  - Press and hold: 2× speed while your finger stays down. Swipe down: close the player.
+    Pinch: fill the screen or fit the whole picture.
+  - Phone-sized controls: Back, title and quality at the top; −10, play/pause, +30 in the
+    middle; a timeline you can drag (it grows, shows the time and chapter, and taps at each
+    chapter), then Audio, Subtitles, Playback and Info with what's chosen now.
+  - Audio, Subtitles and Playback open as a panel from the right. Playback adds speed
+    (0.75× to 2×, not in a watch party).
+  - Subtitles › Size & position: Bottom, Raised, Higher, size and height sliders and a
+    background box, live on the picture. Subtitles can now go much higher than before.
+  - Info: the episode, the show and playback info in tabs, with the next episode beside them.
+  - Up next: a card over the credits with the next episode's picture, "Play in 10" counting
+    down and Watch credits.
 - **iPhone: show and movie pages made for the phone (stage 3).** Upright and sideways.
   - Show page: the next episode to watch with Play / Resume, Watch together and Mark season
     watched (tap twice), season pills, and the episodes (a list upright, a row sideways that
