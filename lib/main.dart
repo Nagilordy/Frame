@@ -814,6 +814,36 @@ class Jellyfin {
   // static=true asks Jellyfin for the original file: no transcoding on the NAS.
   String directStreamUrl(String itemId) =>
       '$server/Videos/$itemId/stream?static=true&ApiKey=$token';
+
+  // ---------- Downloads (see downloads.dart) ----------
+
+  /// The original file, exactly as it is on the server.
+  String downloadUrl(String itemId) => '$server/Items/$itemId/Download';
+
+  /// Whether this profile may download: "Allow media downloading" in the Jellyfin dashboard.
+  bool? _canDownload;
+  Future<bool> canDownload() async {
+    final known = _canDownload;
+    if (known != null) return known;
+    try {
+      final user = await _getJson([Uri.parse('$server/Users/$userId')]);
+      return _canDownload = user['Policy']?['EnableContentDownloading'] != false;
+    } catch (_) {
+      return false; // unknown (server unreachable): ask again next time
+    }
+  }
+
+  /// Where you stopped in a downloaded video, sent once the server can be reached again.
+  /// True when the server took it.
+  Future<bool> syncPosition(String itemId, int ticks) async {
+    try {
+      final res = await _send(_http.post(Uri.parse('$server/Sessions/Playing/Stopped'),
+          headers: _headers, body: jsonEncode({'ItemId': itemId, 'PositionTicks': ticks})));
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 // Continue watching: part-way items and next episodes, newest activity first, one per show.

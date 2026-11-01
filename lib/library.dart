@@ -12,6 +12,7 @@ import 'syncplay.dart' show startWatchTogether, watchTogetherButton, playOrParty
 import 'images.dart';
 import 'movie.dart' show MovieScreen;
 import 'phone.dart';
+import 'downloads.dart' show DownloadButton, Downloads;
 import 'profiles.dart' show showProfileMenu, accentFor;
 import 'ui.dart';
 
@@ -2005,6 +2006,17 @@ class _ShowScreenState extends State<ShowScreen> {
                 child: const Icon(Icons.check_rounded, size: 15, color: kFg),
               ),
             ),
+          if (row && Downloads.instance.localFile(ep['Id'].toString()) != null)
+            Positioned(
+              top: 6,
+              left: 6,
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(color: kBg.withOpacity(0.8), shape: BoxShape.circle),
+                child: const Icon(Icons.download_done_rounded, size: 14, color: kFg),
+              ),
+            ),
           if (progress > 0 && !watched)
             Positioned(
               left: 8,
@@ -2044,6 +2056,7 @@ class _ShowScreenState extends State<ShowScreen> {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [meta, const SizedBox(height: 4), name]),
               ),
+              DownloadButton(jf: jf, item: ep, compact: true),
             ]),
           );
     return GestureDetector(

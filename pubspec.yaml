@@ -17,6 +17,8 @@ dependencies:
   window_manager: ^0.4.3
   gamepads: ^0.1.13
   path_provider: ^2.1.4
+  # Downloads that keep going with the app closed (iOS background transfers), pause/resume.
+  background_downloader: ">=8.5.0 <10.0.0"
 
 # Community fix for GPU video rendering on Linux with recent Flutter
 # (media-kit issue #1404, pull request #1466). Remove once it ships in a release.

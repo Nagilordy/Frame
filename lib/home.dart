@@ -17,6 +17,7 @@ import 'library.dart';
 import 'movie.dart' show MovieScreen;
 import 'images.dart';
 import 'phone.dart';
+import 'downloads.dart' show Downloads, DownloadsScreen;
 import 'profiles.dart' show ProfileChip, ProfileStore, WhoScreen, showProfileMenu, accentFor;
 import 'syncplay.dart' show TogetherPill, startWatchTogether, watchTogetherButton, playOrParty;
 import 'ui.dart';
@@ -75,6 +76,8 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _loadSaved();
     _load();
+    // Downloads: pick up ones that finished while Frame was closed.
+    Downloads.instance.start();
     ProfileStore.serverName().then((n) {
       if (mounted) setState(() => _serverName = n);
     }, onError: (_) {});
@@ -172,6 +175,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _loading = false;
     });
     if (failure == null) _save(results[0], results[1], results[2]);
+    // The server answers: send where you stopped in downloads watched offline.
+    if (failure == null) Downloads.instance.syncPositions(jf);
     // Something failed but the rest loaded: try the missing part again in a few seconds.
     if (failure != null && !nothing && _retriesLeft > 0) {
       _retriesLeft--;
@@ -798,8 +803,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Future<void> _openDownloads() async {
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => DownloadsScreen(jf: jf)));
+    _phoneBack();
+  }
+
   // "Frame" and your avatar, with the library tabs under them (upright) or beside them (sideways).
   Widget _phoneTopBar(BuildContext context, bool upright, EdgeInsets m) {
+    final downloads = PhoneButton(
+      icon: Icons.download_rounded,
+      semanticLabel: 'Downloads',
+      height: upright ? 40 : 36,
+      onTap: _openDownloads,
+    );
     final avatar = PhoneAvatar(
       name: jf.userName ?? '',
       color: accentFor(jf.userId ?? '').$1,
@@ -815,7 +831,7 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: EdgeInsets.only(left: m.left, right: upright ? m.right : 12),
     );
     if (!upright) {
-      return Row(children: [Expanded(child: tabs), avatar, SizedBox(width: m.right)]);
+      return Row(children: [Expanded(child: tabs), downloads, const SizedBox(width: 10), avatar, SizedBox(width: m.right)]);
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(
@@ -823,6 +839,8 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Row(children: [
           Text('Frame', style: phoneTitle(22)),
           const Spacer(),
+          downloads,
+          const SizedBox(width: 10),
           avatar,
         ]),
       ),
@@ -838,12 +856,18 @@ class _HomeScreenState extends State<HomeScreen> {
       return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
         Text(_error!, maxLines: 4, style: phoneText(16, weight: FontWeight.w500, color: _soft, height: 1.4)),
         const SizedBox(height: 16),
-        PhoneButton(
-          primary: true,
-          height: 48,
-          label: login ? 'Sign in' : 'Try again',
-          onTap: login ? _signInAgain : _retry,
-        ),
+        Row(children: [
+          PhoneButton(
+            primary: true,
+            height: 48,
+            label: login ? 'Sign in' : 'Try again',
+            onTap: login ? _signInAgain : _retry,
+          ),
+          if (!login) ...[
+            const SizedBox(width: 10),
+            PhoneButton(height: 48, label: 'Downloads', icon: Icons.download_done_rounded, onTap: _openDownloads),
+          ],
+        ]),
       ]);
     }
     final text = _loading

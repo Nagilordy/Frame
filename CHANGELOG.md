@@ -14,6 +14,17 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **Downloads (step 1: original files).** Watch without the server, on a plane or anywhere.
+  - Download on a movie page and on each episode of a show page (phones). Shown only to
+    profiles allowed to download ("Allow media downloading" in the Jellyfin dashboard).
+  - The original file, in full quality, with its details and artwork. Downloads keep going
+    with Frame closed, pause and resume, retry after a dropped connection, and notify when
+    done. Wi-Fi only by default (a switch on the Downloads screen).
+  - Downloads screen (the download button next to your avatar on Home, and on Home's
+    "can't reach the server" message): what's downloading, what's on the phone, space used;
+    tap to play, swipe left to remove.
+  - Downloads play from the phone even when the server is there. Where you stop is saved and
+    sent to Jellyfin the next time it answers, so Continue watching stays right.
 - **iPhone: Frame's name and icon** on the home screen, instead of the template's.
 - **iPhone: lighter and safer playback.**
   - The picture is drawn at the screen's size instead of the file's: a 4K movie no longer

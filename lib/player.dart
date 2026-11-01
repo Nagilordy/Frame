@@ -24,6 +24,7 @@ import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
 import 'perf.dart' show perfLog;
 import 'tracks.dart';
 import 'phone.dart';
+import 'downloads.dart' show Downloads;
 
 // ---------- Look (same palette as the home screen) ----------
 
@@ -285,7 +286,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         return false;
       }
     } else {
-      url = widget.jf.directStreamUrl(_id);
+      // Downloaded to this device: the file here, no server needed.
+      url = Downloads.instance.localFile(_id) ?? widget.jf.directStreamUrl(_id);
     }
     if (mpv is NativePlayer) {
       // Exact seeks (not the nearest keyframe, which can be seconds away): Watch together
@@ -968,9 +970,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     final item = widget.item;
     final disc = (item['VideoType'] ?? 'VideoFile') != 'VideoFile' ||
         ['iso', 'bluray', 'dvd'].contains((item['Container'] ?? '').toString().toLowerCase());
-    final wantServer = disc ||
-        _mode == 'server' ||
-        (_mode == 'auto' && (_level >= _serverStep || _phoneNeedsServer));
+    final local = Downloads.instance.localFile(_id) != null; // downloaded: always the file here
+    final wantServer = !local &&
+        (disc || _mode == 'server' || (_mode == 'auto' && (_level >= _serverStep || _phoneNeedsServer)));
     if (wantServer) _presetServerTracks();
     // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
     final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
@@ -1018,6 +1020,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     widget.sync?.playerClosed(); // still in the party, just not watching
     _failFocus.dispose();
     if (_failure == null || _session != null) widget.jf.reportStopped(_id, _ticksNow, session: _session);
+    // A download: keep where you stopped on this device too (sent to the server when it answers).
+    if (Downloads.instance.localFile(_id) != null && _ticksNow > 0) Downloads.instance.savePosition(_id, _ticksNow);
     if (_phone) WidgetsBinding.instance.removeObserver(this);
     _tapTimer?.cancel();
     player.dispose();

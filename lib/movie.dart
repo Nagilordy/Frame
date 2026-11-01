@@ -9,6 +9,7 @@ import 'gamepad.dart' show PadHint, PadButton, PadHints;
 import 'images.dart';
 import 'main.dart' show Jellyfin;
 import 'phone.dart';
+import 'downloads.dart' show DownloadButton;
 import 'syncplay.dart' show SyncPlay, playOrParty, startWatchTogether, watchTogetherButton;
 import 'ui.dart';
 
@@ -492,6 +493,8 @@ class _MovieScreenState extends State<MovieScreen> {
                   const SizedBox(width: 10),
                   Expanded(child: mark),
                 ]),
+                const SizedBox(height: 10),
+                DownloadButton(jf: jf, item: movie, height: 48),
                 if (progress > 0) ...[
                   const SizedBox(height: 10),
                   fromStart,
@@ -548,6 +551,7 @@ class _MovieScreenState extends State<MovieScreen> {
                       play,
                       together,
                       mark,
+                      DownloadButton(jf: jf, item: movie, height: 44),
                       if (progress > 0) fromStart,
                     ]),
                     if (_markNote != null) ...[
