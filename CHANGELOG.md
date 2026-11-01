@@ -14,6 +14,13 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: libraries made for the phone (stage 2).** Upright and sideways.
+  - Library tabs scroll at the top; the library's name, how many titles and the current sort
+    and filters, with Sort & filter beside it (white while a filter is on).
+  - Posters three across upright, seven or so sideways, with watched ticks and progress.
+    Scroll with a finger; pull down to refresh.
+  - Sort & filter: a sheet from the bottom upright, a panel from the right sideways. Sort by,
+    Unwatched only, 4K only and genres; every change applies straight away.
 - **iPhone: profile menu and servers made for the phone.** Upright and sideways.
   - Your avatar opens a sheet (a panel from the right when sideways): who you are, the server
     you're on with Change, Start a watch party, Switch profile, Sign out (tap twice). Drag it

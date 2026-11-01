@@ -11,6 +11,8 @@ import 'main.dart' show Jellyfin;
 import 'syncplay.dart' show startWatchTogether, watchTogetherButton, playOrParty;
 import 'images.dart';
 import 'movie.dart' show MovieScreen;
+import 'phone.dart';
+import 'profiles.dart' show showProfileMenu, accentFor;
 import 'ui.dart';
 
 // ---------- Sorting ----------
@@ -220,6 +222,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } else {
       await playOrParty(context, jf, item); // for the party when you're in one
     }
+    // Phones: back from a screen that turned the phone sideways.
+    if (mounted && isPhone(context)) phoneAnyOrientation();
     try {
       final fresh = await jf.item(item['Id'], fresh: true);
       if (mounted && index < _items.length && _items[index]['Id'] == item['Id']) {
@@ -291,6 +295,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (isPhone(context)) return _phoneBuild(context);
     final filters = [
       if (_unwatched) 'unwatched',
       if (_only4k) '4K',
@@ -767,6 +772,389 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         ),
       ]),
+    );
+  }
+
+  // ---------- Phone layout ----------
+  //
+  // Upright: library tabs at the top, the library's name with Sort & filter, then a grid three
+  // posters wide. Sideways: tabs, Sort & filter and your avatar in one bar, and a wider grid
+  // (seven posters on most phones). Pull down to refresh. Sort & filter is a sheet from the
+  // bottom upright, a panel from the right sideways.
+
+  bool _phoneRotationSet = false;
+
+  bool get _filtered => _unwatched || _only4k || _genre != null;
+
+  void _phoneOpenLibrary(dynamic lib) {
+    if (lib['Id'] == _libId) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => LibraryScreen(jf: jf, libraries: widget.libraries, library: lib)));
+  }
+
+  Widget _phoneBuild(BuildContext context) {
+    if (!_phoneRotationSet) {
+      _phoneRotationSet = true;
+      phoneAnyOrientation();
+    }
+    final size = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final upright = size.height > size.width;
+    final m = phoneMargins(context, min: upright ? 20 : 44);
+    final gridW = size.width - m.left - m.right;
+    final cols = upright ? 3 : (gridW / 104).floor().clamp(5, 9).toInt();
+    final gapX = upright ? 12.0 : 10.0;
+    final cellW = (gridW - gapX * (cols - 1)) / cols;
+    final posterH = cellW * 1.5;
+
+    final filters = [
+      if (_unwatched) 'unwatched',
+      if (_only4k) '4K',
+      if (_genre != null) _genre!,
+    ];
+    final kind = widget.library['CollectionType'] == 'movies' ? 'movies' : 'titles';
+    final subtitle = _firstLoad
+        ? 'Loading…'
+        : '$_total ${_total == 1 ? kind.substring(0, kind.length - 1) : kind} · ${_sort.label}'
+            '${filters.isEmpty ? '' : ' · ${filters.join(', ')}'}';
+    final name = widget.library['Name']?.toString() ?? 'Library';
+
+    final avatar = PhoneAvatar(
+      name: jf.userName ?? '',
+      color: accentFor(jf.userId ?? '').$1,
+      size: upright ? 40 : 36,
+      onTap: () => showProfileMenu(context, jf),
+    );
+    final tabs = PhoneTabs(
+      libraries: widget.libraries,
+      currentId: _libId,
+      onHome: () => Navigator.of(context).popUntil((r) => r.isFirst),
+      onLibrary: _phoneOpenLibrary,
+      height: upright ? 38 : 36,
+      padding: EdgeInsets.only(left: m.left, right: upright ? m.right : 12),
+    );
+    final sortButton = PhoneButton(
+      primary: _filtered,
+      label: 'Sort & filter',
+      icon: Icons.tune_rounded,
+      height: upright ? 44 : 36,
+      onTap: _phoneSortFilter,
+    );
+
+    final top = <Widget>[
+      SizedBox(height: pad.top + (upright ? 8 : 12)),
+      if (upright) ...[
+        Padding(
+          padding: EdgeInsets.only(left: m.left, right: m.right),
+          child: Row(children: [Text('Frame', style: phoneTitle(22)), const Spacer(), avatar]),
+        ),
+        const SizedBox(height: 14),
+        tabs,
+        const SizedBox(height: 18),
+        Padding(
+          padding: EdgeInsets.only(left: m.left, right: m.right),
+          child: Row(children: [
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneTitle(26)),
+                const SizedBox(height: 2),
+                Text(subtitle,
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(13, color: kMuted)),
+              ]),
+            ),
+            const SizedBox(width: 12),
+            sortButton,
+          ]),
+        ),
+        const SizedBox(height: 18),
+      ] else ...[
+        Row(children: [
+          Expanded(child: tabs),
+          sortButton,
+          const SizedBox(width: 10),
+          avatar,
+          SizedBox(width: m.right),
+        ]),
+        const SizedBox(height: 12),
+        Padding(
+          padding: EdgeInsets.only(left: m.left, right: m.right),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.baseline, textBaseline: TextBaseline.alphabetic, children: [
+            Text(name, style: phoneTitle(22)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(subtitle,
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(13, color: kMuted)),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 12),
+      ],
+    ];
+
+    Widget message(Widget child) => SliverToBoxAdapter(
+          child: Padding(padding: EdgeInsets.fromLTRB(m.left, 20, m.right, 0), child: child),
+        );
+
+    final Widget body;
+    if (_firstLoad) {
+      body = message(Text('Loading…', style: phoneText(16, weight: FontWeight.w500, color: kMuted)));
+    } else if (_error != null && _items.isEmpty) {
+      body = message(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(_error!, style: phoneText(15, weight: FontWeight.w500, color: kSoft, height: 1.4)),
+        const SizedBox(height: 14),
+        PhoneButton(primary: true, label: 'Try again', height: 44, onTap: _reload),
+      ]));
+    } else if (_items.isEmpty) {
+      body = message(Text(_filtered ? 'Nothing matches these filters.' : 'This library is empty.',
+          style: phoneText(16, weight: FontWeight.w500, color: kMuted)));
+    } else {
+      body = SliverPadding(
+        padding: EdgeInsets.only(left: m.left, right: m.right, bottom: pad.bottom + 28),
+        sliver: SliverGrid(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: cols,
+            crossAxisSpacing: gapX,
+            mainAxisSpacing: upright ? 18 : 14,
+            mainAxisExtent: posterH + 26,
+          ),
+          delegate: SliverChildBuilderDelegate(
+            (context, i) {
+              // Fetch the next page before reaching the end.
+              if (i >= _items.length - cols * 4) _loadMore();
+              return _phonePoster(i, cellW, posterH);
+            },
+            childCount: _items.length,
+          ),
+        ),
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: kBg,
+      body: RefreshIndicator(
+        onRefresh: _reload,
+        color: kFg,
+        backgroundColor: const Color(0xFF151920),
+        edgeOffset: pad.top,
+        child: CustomScrollView(
+          controller: _grid,
+          physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+          slivers: [
+            SliverToBoxAdapter(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: top)),
+            body,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _phonePoster(int index, double w, double h) {
+    final item = _items[index];
+    final watched = isWatched(item);
+    final progress = progressOf(item);
+    final decode = phoneDecode(context, w);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        phoneTap();
+        _open(index);
+      },
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: SizedBox(
+            width: w,
+            height: h,
+            child: Stack(fit: StackFit.expand, children: [
+              netImage(
+                jf.image(item['Id'], 'Primary', maxWidth: decode),
+                cacheWidth: decode,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Container(
+                  color: kPlaceholder,
+                  padding: const EdgeInsets.all(8),
+                  alignment: Alignment.bottomLeft,
+                  child: Text(titleOf(item), style: phoneText(12, weight: FontWeight.w700)),
+                ),
+              ),
+              if (watched)
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Container(
+                    width: 22,
+                    height: 22,
+                    decoration: BoxDecoration(color: kBg.withOpacity(0.8), shape: BoxShape.circle),
+                    child: const Icon(Icons.check_rounded, size: 15, color: kFg),
+                  ),
+                ),
+              if (progress > 0 && !watched)
+                Positioned(
+                  left: 6,
+                  right: 6,
+                  bottom: 6,
+                  child: PhoneProgress(value: progress, height: 3, track: const Color(0x8C06080B)),
+                ),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(item['Name']?.toString() ?? '',
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(12.5, color: kSoft)),
+      ]),
+    );
+  }
+
+  // Sort & filter on a phone: a sheet from the bottom (upright) or a panel from the right
+  // (sideways). Every change applies straight away; Done (or a swipe) closes it.
+  Future<void> _phoneSortFilter() async {
+    if (_genres == null) {
+      try {
+        _genres = await jf.genres(_libId);
+      } catch (_) {
+        _genres = [];
+      }
+    }
+    if (!mounted) return;
+    final upright = isUpright(context);
+
+    Widget content(BuildContext sheetContext, StateSetter refresh) {
+      void change(VoidCallback apply) {
+        phoneTap();
+        setState(apply);
+        refresh(() {});
+        _reload();
+      }
+
+      Widget chip(String label, bool on, VoidCallback onTap) => GestureDetector(
+            onTap: () => change(onTap),
+            child: Container(
+              height: upright ? 40 : 34,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: on ? kFg : const Color(0x8C4A4E57),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(label,
+                    style: phoneText(upright ? 15 : 14,
+                        weight: on ? FontWeight.w700 : FontWeight.w600, color: on ? kBg : kFg)),
+              ]),
+            ),
+          );
+
+      Widget label(String text) => Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(text, style: phoneText(12, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1)),
+          );
+
+      Widget toggle(String text, bool on, VoidCallback flip) => InkWell(
+            onTap: () => change(flip),
+            child: SizedBox(
+              height: upright ? 52 : 44,
+              child: Row(children: [
+                Expanded(child: Text(text, style: phoneText(16))),
+                Switch.adaptive(
+                  value: on,
+                  activeColor: kAccent,
+                  onChanged: (_) => change(flip),
+                ),
+              ]),
+            ),
+          );
+
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        if (upright) ...[
+          Center(
+            child: Container(
+              width: 40,
+              height: 5,
+              decoration: BoxDecoration(color: const Color(0x4DF4F5F7), borderRadius: BorderRadius.circular(3)),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        Row(children: [
+          Expanded(child: Text('Sort & filter', style: phoneTitle(upright ? 22 : 20))),
+          PhoneButton(
+              primary: true, label: 'Done', height: upright ? 40 : 36, onTap: () => Navigator.of(sheetContext).pop()),
+        ]),
+        const SizedBox(height: 18),
+        label('SORT BY'),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          for (final srt in _sorts) chip(srt.label, srt.label == _sort.label, () => _sort = srt),
+        ]),
+        const SizedBox(height: 18),
+        label('SHOW'),
+        toggle('Unwatched only', _unwatched, () => _unwatched = !_unwatched),
+        const Divider(height: 1, thickness: 1, color: Color(0x14F4F5F7)),
+        toggle('4K only', _only4k, () => _only4k = !_only4k),
+        if ((_genres ?? const []).isNotEmpty) ...[
+          const SizedBox(height: 18),
+          label('GENRE'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            chip('All', _genre == null, () => _genre = null),
+            for (final g in _genres!) chip(g, g == _genre, () => _genre = g),
+          ]),
+        ],
+      ]);
+    }
+
+    if (upright) {
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: const Color(0xFF151920),
+        barrierColor: const Color(0xAD06080B),
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.85),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+        builder: (sheetContext) => StatefulBuilder(
+          builder: (sheetContext, refresh) => SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(20, 10, 20, MediaQuery.paddingOf(context).bottom + 24),
+            child: content(sheetContext, refresh),
+          ),
+        ),
+      );
+      return;
+    }
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: const Color(0xAD06080B),
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (dialogContext, _, __) {
+        final pad = MediaQuery.paddingOf(dialogContext);
+        return Align(
+          alignment: Alignment.centerRight,
+          child: GestureDetector(
+            onHorizontalDragEnd: (d) {
+              if ((d.primaryVelocity ?? 0) > 300) Navigator.of(dialogContext).pop();
+            },
+            child: Material(
+              color: const Color(0xFF151920),
+              borderRadius: const BorderRadius.horizontal(left: Radius.circular(24)),
+              child: SizedBox(
+                width: 400 + pad.right,
+                height: double.infinity,
+                child: StatefulBuilder(
+                  builder: (panelContext, refresh) => SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(24, pad.top + 18, pad.right > 24 ? pad.right : 24, pad.bottom + 18),
+                    child: content(dialogContext, refresh),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      // Slides in from the right.
+      transitionBuilder: (_, a, __, child) => SlideTransition(
+        position: Tween(begin: const Offset(0.3, 0), end: Offset.zero)
+            .animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
+        child: FadeTransition(opacity: a, child: child),
+      ),
     );
   }
 }
