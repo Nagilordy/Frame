@@ -20,6 +20,7 @@ import 'home.dart' show HomeScreen;
 import 'images.dart' show netImage;
 import 'keyboard.dart' show TvTextField;
 import 'main.dart' show Jellyfin;
+import 'phone.dart';
 import 'syncplay.dart' show SyncPlay, showPartyMenu, showStartParty;
 import 'ui.dart';
 
@@ -142,6 +143,19 @@ class ProfileStore {
     }
     if (p.getString('lastUser@$s') == userId) await p.remove('lastUser@$s');
   }
+
+  /// Removes a saved server and every sign-in kept for it (not the one in use).
+  static Future<void> forgetServer(String url) async {
+    final p = await _p;
+    final all = await servers();
+    all.remove(url);
+    await p.setString('servers', jsonEncode(all));
+    await p.remove('profiles@$url');
+    await p.remove('lastUser@$url');
+  }
+
+  /// How many profiles are signed in on a server on this device.
+  static Future<int> signedIn(String url) async => (await profiles(url)).length;
 }
 
 // ---------- Opening Home for a profile ----------
@@ -1121,6 +1135,10 @@ class ServerScreen extends StatefulWidget {
 class _ServerScreenState extends State<ServerScreen> {
   final _address = TextEditingController();
   List<({String name, String address})>? _found;
+  // Phones show these apart: servers saved on this device, and what the network answered.
+  List<({String name, String address})> _saved = [];
+  List<({String name, String address})>? _network;
+  final Map<String, int> _signedIn = {};
   String? _error;
   bool _busy = false;
   final _cards = FocusNodeList('Server');
@@ -1140,18 +1158,32 @@ class _ServerScreenState extends State<ServerScreen> {
   }
 
   Future<void> _search() async {
-    setState(() => _found = null);
+    setState(() {
+      _found = null;
+      _network = null;
+    });
     // Servers already signed in to on this PC first (yours, a friend's), then what the
     // network answers.
     final saved = await ProfileStore.servers();
     final list = <({String name, String address})>[
       for (final e in saved.entries) (name: e.value, address: e.key),
     ];
+    for (final s in list) {
+      _signedIn[s.address] = await ProfileStore.signedIn(s.address);
+    }
+    if (mounted) setState(() => _saved = List.of(list));
+    final network = <({String name, String address})>[];
     for (final s in await discoverServers()) {
-      if (!list.any((x) => x.address == s.address)) list.add(s);
+      if (!list.any((x) => x.address == s.address)) {
+        list.add(s);
+        network.add(s);
+      }
     }
     if (!mounted) return;
-    setState(() => _found = list);
+    setState(() {
+      _found = list;
+      _network = network;
+    });
     if (list.isNotEmpty) WidgetsBinding.instance.addPostFrameCallback((_) => focusOn(_cards[0]));
   }
 
@@ -1220,6 +1252,7 @@ class _ServerScreenState extends State<ServerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (isPhone(context)) return _phoneBuild(context);
     final searching = _found == null;
     final found = _found ?? const <({String name, String address})>[];
     final first = widget.current == null; // Frame's very first screen
@@ -1311,6 +1344,395 @@ class _ServerScreenState extends State<ServerScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  // ---------- Phone layout ----------
+  //
+  // Upright: your servers (the one in use white and marked Connected, the others to switch
+  // to, swipe left to forget one), then what Frame finds on the Wi-Fi, and Add for an address.
+  // Sideways: the title and Add on the left, the lists on the right.
+
+  bool _phoneRotationSet = false;
+
+  Future<void> _forgetServer(String address) async {
+    setState(() {
+      _saved.removeWhere((s) => s.address == address);
+      _found?.removeWhere((s) => s.address == address);
+    });
+    try {
+      await ProfileStore.forgetServer(address);
+    } catch (_) {}
+  }
+
+  Future<void> _phoneAdd() async {
+    final address = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: const Color(0xFF151920),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(28))),
+      builder: (_) => const _PhoneAddServer(),
+    );
+    if (address != null && mounted) _connect(address);
+  }
+
+  Widget _phoneLabel(String text) => Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Text(text, style: phoneText(12, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1)),
+      );
+
+  Widget _phoneServerRow(({String name, String address}) s, {required bool saved, required bool upright}) {
+    final current = s.address == widget.current;
+    final host = Uri.tryParse(s.address)?.authority ?? s.address;
+    final count = _signedIn[s.address] ?? 0;
+    final sub = saved ? '$host · ${count == 1 ? '1 profile' : '$count profiles'} signed in' : host;
+    final fg = current ? kBg : kFg;
+    final card = Material(
+      color: current ? kFg : (saved ? const Color(0xFF20252E) : const Color(0xB32C313B)),
+      borderRadius: BorderRadius.circular(18),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: _busy
+            ? null
+            : () {
+                phoneTap();
+                _connect(s.address);
+              },
+        child: Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: upright ? 14 : 12),
+          child: Row(children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: current ? kBg : const Color(0xBF4A4E57),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(saved ? Icons.dns_outlined : Icons.wifi_rounded, size: 22, color: kFg),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(s.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: phoneText(17, weight: FontWeight.w700, color: fg)),
+                const SizedBox(height: 2),
+                Text(sub,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: phoneText(13, color: current ? const Color(0xFF3B414C) : kMuted)),
+              ]),
+            ),
+            const SizedBox(width: 10),
+            if (current)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(color: kBg, borderRadius: BorderRadius.circular(999)),
+                child: Text('Connected', style: phoneText(12, weight: FontWeight.w700)),
+              )
+            else
+              Text(saved ? 'Switch' : 'Connect', style: phoneText(15, weight: FontWeight.w700)),
+          ]),
+        ),
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      // Swipe a saved server (not the one in use) to the left to forget it and its sign-ins.
+      child: saved && !current
+          ? Dismissible(
+              key: ValueKey('server ${s.address}'),
+              direction: DismissDirection.endToStart,
+              background: Container(
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.only(right: 24),
+                decoration: BoxDecoration(color: const Color(0xFF8A2E2E), borderRadius: BorderRadius.circular(18)),
+                child: Text('Forget', style: phoneText(15, weight: FontWeight.w700)),
+              ),
+              onDismissed: (_) {
+                HapticFeedback.mediumImpact();
+                _forgetServer(s.address);
+              },
+              child: card,
+            )
+          : card,
+    );
+  }
+
+  Widget _phoneBuild(BuildContext context) {
+    if (!_phoneRotationSet) {
+      _phoneRotationSet = true;
+      phoneAnyOrientation();
+    }
+    final upright = isUpright(context);
+    final pad = MediaQuery.paddingOf(context);
+    final m = phoneMargins(context, min: upright ? 20 : 44);
+    final first = widget.current == null; // Frame's very first screen
+    final canBack = !first && Navigator.of(context).canPop();
+    final searching = _network == null;
+    final network = _network ?? const <({String name, String address})>[];
+
+    final back = Semantics(
+      button: true,
+      label: 'Back',
+      child: GestureDetector(
+        onTap: () {
+          phoneTap();
+          Navigator.of(context).pop();
+        },
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: const BoxDecoration(color: Color(0x8C4A4E57), shape: BoxShape.circle),
+          child: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: kFg),
+        ),
+      ),
+    );
+    final title = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(first ? 'WELCOME TO FRAME' : 'SERVER',
+          style: phoneText(12, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1.2)),
+      const SizedBox(height: 6),
+      Text("Where's your library?", style: phoneTitle(upright ? 30 : 28)),
+    ]);
+    final note = Text('Each server keeps its own sign-ins, so switching back is instant.',
+        style: phoneText(13, weight: FontWeight.w500, color: kMuted, height: 1.5));
+
+    final lists = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (_saved.isNotEmpty) ...[
+        _phoneLabel('YOUR SERVERS'),
+        for (final s in _saved) _phoneServerRow(s, saved: true, upright: upright),
+        const SizedBox(height: 12),
+      ],
+      Row(children: [
+        Expanded(child: _phoneLabel('ON YOUR NETWORK')),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: searching
+              ? Row(children: [
+                  const SizedBox(
+                      width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: kMuted)),
+                  const SizedBox(width: 8),
+                  Text('Looking…', style: phoneText(13, color: kMuted)),
+                ])
+              : GestureDetector(
+                  onTap: () {
+                    phoneTap();
+                    _search();
+                  },
+                  child: Text('Search again', style: phoneText(13, weight: FontWeight.w700)),
+                ),
+        ),
+      ]),
+      if (!searching && network.isEmpty)
+        Text('Nothing else found on this Wi-Fi. Add a server by its address.',
+            style: phoneText(14, weight: FontWeight.w500, color: kMuted, height: 1.4)),
+      for (final s in network) _phoneServerRow(s, saved: false, upright: upright),
+      if (_busy) ...[
+        const SizedBox(height: 8),
+        Text('Connecting…', style: phoneText(14, color: kSoft)),
+      ],
+      if (_error != null) ...[
+        const SizedBox(height: 8),
+        Text(_error!, style: phoneText(14, weight: FontWeight.w500, color: const Color(0xFFFF9A8A), height: 1.4)),
+      ],
+    ]);
+
+    if (upright) {
+      return Scaffold(
+        backgroundColor: kBg,
+        body: ListView(
+          padding: EdgeInsets.fromLTRB(m.left, pad.top + 10, m.right, pad.bottom + 28),
+          children: [
+            Row(children: [
+              if (canBack) back,
+              const Spacer(),
+              PhoneButton(label: 'Add', icon: Icons.add_rounded, height: 44, onTap: _phoneAdd),
+            ]),
+            const SizedBox(height: 22),
+            title,
+            const SizedBox(height: 26),
+            lists,
+            const SizedBox(height: 20),
+            note,
+          ],
+        ),
+      );
+    }
+    return Scaffold(
+      backgroundColor: kBg,
+      body: Padding(
+        padding: EdgeInsets.fromLTRB(m.left, pad.top + 16, m.right, 0),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(
+            width: 270,
+            child: Padding(
+              padding: EdgeInsets.only(bottom: pad.bottom + 18),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                if (canBack) back,
+                const SizedBox(height: 18),
+                title,
+                const SizedBox(height: 12),
+                note,
+                const Spacer(),
+                PhoneButton(label: 'Add a server', icon: Icons.add_rounded, height: 44, onTap: _phoneAdd),
+              ]),
+            ),
+          ),
+          const SizedBox(width: 28),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.only(top: 6, bottom: pad.bottom + 20),
+              children: [lists],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// Phones: the Add a server sheet. One address field (the phone's own keyboard), checked as
+/// you type, and Connect. Pops with the address to connect to.
+class _PhoneAddServer extends StatefulWidget {
+  const _PhoneAddServer();
+
+  @override
+  State<_PhoneAddServer> createState() => _PhoneAddServerState();
+}
+
+class _PhoneAddServerState extends State<_PhoneAddServer> {
+  final _text = TextEditingController();
+  Timer? _check;
+  String? _found; // "Home Theater · Jellyfin 10.10.3" once the address answers
+  bool _checking = false;
+  bool _noAnswer = false;
+
+  @override
+  void dispose() {
+    _check?.cancel();
+    _text.dispose();
+    super.dispose();
+  }
+
+  // A moment after typing stops, see whether a Jellyfin server answers there.
+  void _changed(String value) {
+    _check?.cancel();
+    setState(() {
+      _found = null;
+      _noAnswer = false;
+      _checking = false;
+    });
+    final address = _normalize(value);
+    if (address.length < 10) return;
+    _check = Timer(const Duration(milliseconds: 700), () async {
+      if (!mounted) return;
+      setState(() => _checking = true);
+      try {
+        final info = await Jellyfin(address).publicInfo().timeout(const Duration(seconds: 5));
+        if (!mounted || _normalize(_text.text) != address) return;
+        final version = info['Version']?.toString();
+        setState(() {
+          _found = '${info['ServerName'] ?? 'Jellyfin'} · Jellyfin${version == null ? '' : ' $version'}';
+          _checking = false;
+        });
+      } catch (_) {
+        if (!mounted || _normalize(_text.text) != address) return;
+        setState(() {
+          _noAnswer = true;
+          _checking = false;
+        });
+      }
+    });
+  }
+
+  void _submit() {
+    final address = _normalize(_text.text);
+    if (address.isEmpty) return;
+    phoneTap();
+    Navigator.of(context).pop(address);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ready = _text.text.trim().isNotEmpty;
+    return ValueListenableBuilder<double>(
+      // The app takes the keyboard out of the layout (see _phoneFrame); keep the sheet above it.
+      valueListenable: keyboardInset,
+      builder: (context, inset, _) => SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(20, 10, 20, 20 + inset),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 5,
+              decoration: BoxDecoration(color: const Color(0x4DF4F5F7), borderRadius: BorderRadius.circular(3)),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(children: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel', style: phoneText(16, color: kSoft)),
+            ),
+            Expanded(child: Center(child: Text('Add a server', style: phoneTitle(18)))),
+            Opacity(
+              opacity: ready ? 1 : 0.4,
+              child: PhoneButton(primary: true, label: 'Connect', height: 40, onTap: ready ? _submit : () {}),
+            ),
+          ]),
+          const SizedBox(height: 16),
+          Text('ADDRESS', style: phoneText(12, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 1)),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _text,
+            autofocus: true,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            enableSuggestions: false,
+            textInputAction: TextInputAction.go,
+            onChanged: _changed,
+            onSubmitted: (_) => _submit(),
+            cursorColor: kFg,
+            style: phoneText(17),
+            decoration: InputDecoration(
+              hintText: '192.168.1.10:8096 or jellyfin.example.com',
+              hintStyle: phoneText(16, weight: FontWeight.w500, color: kDim),
+              filled: true,
+              fillColor: const Color(0xFF0E1116),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: Color(0x40F4F5F7), width: 2),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: const BorderSide(color: kFg, width: 2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text('With or without http://. Port 8096 if you leave it out.',
+              style: phoneText(13, weight: FontWeight.w500, color: kMuted)),
+          const SizedBox(height: 14),
+          if (_checking)
+            Row(children: [
+              const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: kMuted)),
+              const SizedBox(width: 10),
+              Text('Checking…', style: phoneText(14, color: kMuted)),
+            ])
+          else if (_found != null)
+            Row(children: [
+              const Icon(Icons.check_circle_outline_rounded, size: 20, color: Color(0xFF3FCFA6)),
+              const SizedBox(width: 10),
+              Expanded(child: Text('Found $_found', style: phoneText(14, weight: FontWeight.w700))),
+            ])
+          else if (_noAnswer)
+            Text('No Jellyfin server answers there yet. Check the address, or connect anyway.',
+                style: phoneText(14, weight: FontWeight.w500, color: const Color(0xFFFF9A8A), height: 1.4)),
+        ]),
       ),
     );
   }
@@ -1474,12 +1896,161 @@ class _ProfileMenuState extends State<_ProfileMenu> {
 
   static const _sheet = Color(0xFF12151B);
 
+  // Phones: a sheet from the bottom (upright) or a panel from the right (sideways), in phone
+  // sizes. Who you are, the server you're on with Change, then the actions. Drag it away or
+  // tap outside to close.
+  Widget _phoneMenu(BuildContext context, String name, bool inParty) {
+    final upright = isUpright(context);
+    final pad = MediaQuery.paddingOf(context);
+    final server = _serverName ?? 'Jellyfin';
+    final host = Uri.tryParse(jf.server)?.host ?? '';
+    const divider = Divider(height: 1, thickness: 1, color: Color(0x14F4F5F7));
+
+    Widget action(IconData icon, String label, VoidCallback onTap, {bool warn = false}) {
+      final color = warn ? const Color(0xFFFF9A8A) : kFg;
+      return InkWell(
+        onTap: () {
+          phoneTap();
+          onTap();
+        },
+        child: SizedBox(
+          height: upright ? 56 : 48,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              Icon(icon, size: 22, color: color),
+              const SizedBox(width: 14),
+              Expanded(child: Text(label, style: phoneText(16, color: color))),
+            ]),
+          ),
+        ),
+      );
+    }
+
+    final content = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      if (upright) ...[
+        Center(
+          child: Container(
+            width: 40,
+            height: 5,
+            decoration: BoxDecoration(color: const Color(0x4DF4F5F7), borderRadius: BorderRadius.circular(3)),
+          ),
+        ),
+        const SizedBox(height: 16),
+      ],
+      Row(children: [
+        ProfileAvatar(server: jf.server, id: jf.userId ?? '', name: name, tag: jf.userImageTag, size: upright ? 56 : 48),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 22 : 20)),
+            const SizedBox(height: 2),
+            Text('$server · $host',
+                maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(13, color: kMuted)),
+          ]),
+        ),
+      ]),
+      SizedBox(height: upright ? 18 : 12),
+      // The server you're on, with Change: opens Change server.
+      Material(
+        color: const Color(0xD92C313B),
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () {
+            phoneTap();
+            _server();
+          },
+          child: Padding(
+            padding: EdgeInsets.all(upright ? 14 : 10),
+            child: Row(children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(color: const Color(0xBF4A4E57), borderRadius: BorderRadius.circular(12)),
+                child: const Icon(Icons.dns_outlined, size: 20, color: kFg),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('SERVER', style: phoneText(11, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 0.8)),
+                  const SizedBox(height: 2),
+                  Text(server,
+                      maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(16, weight: FontWeight.w700)),
+                ]),
+              ),
+              Text('Change', style: phoneText(14, weight: FontWeight.w700)),
+              const SizedBox(width: 4),
+              const Icon(Icons.chevron_right_rounded, size: 20, color: kFg),
+            ]),
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
+      ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Material(
+          color: const Color(0x8C2C313B),
+          child: Column(children: [
+            action(Icons.groups_rounded, inParty ? 'Your watch party' : 'Start a watch party', _party),
+            divider,
+            action(Icons.switch_account_rounded, 'Switch profile', _switch),
+            divider,
+            action(Icons.logout_rounded, _confirmSignOut ? 'Tap again to sign out' : 'Sign out', _signOut,
+                warn: _confirmSignOut),
+          ]),
+        ),
+      ),
+    ]);
+
+    final close = () => Navigator.of(context).pop();
+    if (upright) {
+      return Align(
+        alignment: Alignment.bottomCenter,
+        child: GestureDetector(
+          onVerticalDragEnd: (d) {
+            if ((d.primaryVelocity ?? 0) > 300) close();
+          },
+          child: Material(
+            color: const Color(0xFF151920),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(20, 10, 20, pad.bottom + 20),
+              child: content,
+            ),
+          ),
+        ),
+      );
+    }
+    return Align(
+      alignment: Alignment.centerRight,
+      child: GestureDetector(
+        onHorizontalDragEnd: (d) {
+          if ((d.primaryVelocity ?? 0) > 300) close();
+        },
+        child: Material(
+          color: const Color(0xFF151920),
+          borderRadius: const BorderRadius.horizontal(left: Radius.circular(24)),
+          child: SizedBox(
+            width: 400 + pad.right,
+            height: double.infinity,
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(24, pad.top + 20, pad.right > 24 ? pad.right : 24, pad.bottom + 18),
+              child: content,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final name = jf.userName?.isNotEmpty == true ? jf.userName! : 'Profile';
     final now = TimeOfDay.now();
     final clock = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     final inParty = SyncPlay.of(jf).inParty;
+    if (isPhone(context)) return _phoneMenu(context, name, inParty);
     return PadHints(
       hints: const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')],
       child: Focus(

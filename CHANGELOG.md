@@ -14,6 +14,15 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: profile menu and servers made for the phone.** Upright and sideways.
+  - Your avatar opens a sheet (a panel from the right when sideways): who you are, the server
+    you're on with Change, Start a watch party, Switch profile, Sign out (tap twice). Drag it
+    away or tap outside to close.
+  - Change server: your servers first, the one in use marked Connected, each with how many
+    profiles are signed in; swipe one to the left to forget it and its sign-ins. Then what
+    Frame finds on your Wi-Fi.
+  - Add a server: one address field with the phone's own keyboard, checked as you type
+    ("Found Home Theater · Jellyfin 10.10"), then Connect.
 - **Watch parties.** A room that stays together between videos.
   - Start one from the Triangle menu on Home: "Start a watch party". Nothing has to play yet.
   - Friends get an invite on their Home and join with Triangle.
