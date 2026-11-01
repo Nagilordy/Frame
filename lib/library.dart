@@ -1248,6 +1248,7 @@ class _ShowScreenState extends State<ShowScreen> {
     _markTimer?.cancel();
     _seasonTimer?.cancel();
     _epScroll.dispose();
+    _phoneRow?.dispose();
     _backNode.dispose();
     _playNode.dispose();
     _markNode.dispose();
@@ -1390,6 +1391,7 @@ class _ShowScreenState extends State<ShowScreen> {
       _shownEp = null;
       _loading = true;
     });
+    _phoneRow = null; // the next build makes a fresh one for this season
     if (cached) {
       _loadEpisodes();
     } else {
@@ -1399,6 +1401,8 @@ class _ShowScreenState extends State<ShowScreen> {
 
   Future<void> _play(dynamic episode) async {
     await playOrParty(context, jf, episode); // for the party when you're in one
+    // Phones: the player turned the phone sideways; this page can turn again.
+    if (mounted && isPhone(context)) phoneAnyOrientation();
     // Back from watching: the page moves to the next episode's season (after a season finale,
     // that's the next season), with the next episode selected.
     _load(fresh: true);
@@ -1459,6 +1463,7 @@ class _ShowScreenState extends State<ShowScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (isPhone(context)) return _phoneBuild(context);
     final series = _details ?? widget.series;
     final logo = jf.logoFor(series);
     final title = Text(series['Name']?.toString() ?? '', style: tvDisplay(64), maxLines: 2);
@@ -1893,6 +1898,390 @@ class _ShowScreenState extends State<ShowScreen> {
           );
         },
       ),
+    );
+  }
+
+  // ---------- Phone layout ----------
+  //
+  // Upright: the show's artwork at the top, the next episode to watch with Play, Watch together
+  // and Mark season watched, the season pills, then the episodes as a list. Sideways: the TV
+  // page re-sized for a phone, artwork across the screen, the details on the left and the
+  // episodes as a row along the bottom. Tap an episode to play it.
+
+  bool _phoneRotationSet = false;
+  ScrollController? _phoneRow; // the sideways episode row
+
+  Widget _phoneBack(double top, double left) => Positioned(
+        left: left,
+        top: top,
+        child: Semantics(
+          button: true,
+          label: 'Back',
+          child: GestureDetector(
+            onTap: () {
+              phoneTap();
+              Navigator.of(context).maybePop();
+            },
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: const BoxDecoration(color: Color(0x8C06080B), shape: BoxShape.circle),
+              child: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: kFg),
+            ),
+          ),
+        ),
+      );
+
+  Widget _phoneSeasons(EdgeInsets m, double height) {
+    if (_seasons.length < 2) return const SizedBox.shrink();
+    return SizedBox(
+      height: height,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.only(left: m.left, right: m.right),
+        itemCount: _seasons.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (_, i) {
+          final on = i == _season;
+          return GestureDetector(
+            onTap: () {
+              phoneTap();
+              _pickSeason(i);
+            },
+            child: Container(
+              height: height,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: on ? const Color(0xEB2C313B) : Colors.transparent,
+                borderRadius: BorderRadius.circular(height / 2),
+              ),
+              child: Text(_seasons[i]['Name']?.toString() ?? 'Season ${i + 1}',
+                  style: phoneText(15, weight: on ? FontWeight.w700 : FontWeight.w600, color: on ? kFg : kSoft)),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // One episode: its picture (with a play mark on the next one, a bar when started, a tick
+  // when watched), "EPISODE 5 · 24 MIN" and its title.
+  Widget _phoneEpisode(dynamic ep, {required double thumbW, required bool row}) {
+    final isNext = _next != null && ep['Id'] == _next['Id'];
+    final mins = runtimeMinutes(ep);
+    final progress = progressOf(ep);
+    final watched = isWatched(ep);
+    final decode = phoneDecode(context, thumbW);
+    final thumb = ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: SizedBox(
+        width: thumbW,
+        height: thumbW * 9 / 16,
+        child: Stack(fit: StackFit.expand, children: [
+          netImage(
+            jf.image(ep['Id'], 'Primary', maxWidth: decode),
+            cacheWidth: decode,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder),
+          ),
+          if (isNext)
+            Center(
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: const BoxDecoration(color: Color(0xE6F4F5F7), shape: BoxShape.circle),
+                child: const Icon(Icons.play_arrow_rounded, size: 22, color: kBg),
+              ),
+            ),
+          if (watched)
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: BoxDecoration(color: kBg.withOpacity(0.8), shape: BoxShape.circle),
+                child: const Icon(Icons.check_rounded, size: 15, color: kFg),
+              ),
+            ),
+          if (progress > 0 && !watched)
+            Positioned(
+              left: 8,
+              right: 8,
+              bottom: 8,
+              child: PhoneProgress(value: progress, height: 3, track: const Color(0x8C06080B)),
+            ),
+        ]),
+      ),
+    );
+    final meta = Text('EPISODE ${ep['IndexNumber'] ?? '?'}${mins > 0 ? ' · $mins MIN' : ''}',
+        style: phoneText(11, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 0.8));
+    final name = Text(ep['Name']?.toString() ?? '',
+        maxLines: row ? 1 : 2,
+        overflow: TextOverflow.ellipsis,
+        style: phoneText(row ? 13 : 15, weight: FontWeight.w600, height: 1.25));
+    final child = row
+        ? SizedBox(
+            width: thumbW,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              thumb,
+              const SizedBox(height: 6),
+              meta,
+              const SizedBox(height: 2),
+              name,
+            ]),
+          )
+        : Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: isNext ? const Color(0xD92C313B) : Colors.transparent,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(children: [
+              thumb,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [meta, const SizedBox(height: 4), name]),
+              ),
+            ]),
+          );
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        phoneTap();
+        _play(ep);
+      },
+      child: child,
+    );
+  }
+
+  Widget _phoneBuild(BuildContext context) {
+    if (!_phoneRotationSet) {
+      _phoneRotationSet = true;
+      phoneAnyOrientation();
+    }
+    final size = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final upright = size.height > size.width;
+    final m = phoneMargins(context, min: upright ? 20 : 44);
+    final series = _details ?? widget.series;
+    final next = _next;
+    final target = next ?? (_episodes.isNotEmpty ? _episodes.first : null);
+    final showName = series['Name']?.toString() ?? '';
+    final overview = ((next?['Overview'] ?? series['Overview']) ?? '').toString();
+    final sample = _episodes.isNotEmpty ? _episodes.first : next;
+    final meta = next != null
+        ? [
+            'S${next['ParentIndexNumber'] ?? '?'} · E${next['IndexNumber'] ?? '?'}',
+            if (runtimeMinutes(next) > 0) '${runtimeMinutes(next)} min',
+            if (progressOf(next) > 0) '${minutesLeft(next)} min left',
+          ].join(' · ')
+        : [
+            series['ProductionYear']?.toString() ?? '',
+            if (_seasons.isNotEmpty) '${_seasons.length} ${_seasons.length == 1 ? 'season' : 'seasons'}',
+            if (sample != null) qualityLine(sample),
+          ].where((s) => s.isNotEmpty).join(' · ');
+    final playLabel = target == null
+        ? 'Play'
+        : '${progressOf(target) > 0 ? 'Resume' : 'Play'} E${target['IndexNumber'] ?? '?'}';
+    final backW = upright ? 300 * 16 / 9 : size.width;
+    final decode = phoneDecode(context, backW).clamp(640, 2560).toInt();
+
+    final backdrop = netImage(
+      jf.backdropFor(series, maxWidth: decode),
+      cacheWidth: decode,
+      width: double.infinity,
+      height: double.infinity,
+      fit: BoxFit.cover,
+      alignment: upright ? Alignment.center : Alignment.topCenter,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder),
+    );
+
+    final buttons = Row(children: [
+      if (upright)
+        Expanded(
+          child: PhoneButton(
+              primary: true,
+              label: playLabel,
+              icon: Icons.play_arrow_rounded,
+              height: 50,
+              onTap: () {
+                if (target != null) _play(target);
+              }),
+        )
+      else
+        PhoneButton(
+            primary: true,
+            label: playLabel,
+            icon: Icons.play_arrow_rounded,
+            height: 44,
+            onTap: () {
+              if (target != null) _play(target);
+            }),
+      const SizedBox(width: 10),
+      PhoneButton(
+        icon: Icons.people_alt_outlined,
+        semanticLabel: 'Watch together',
+        height: upright ? 50 : 44,
+        onTap: () {
+          if (target != null) startWatchTogether(context, jf, target);
+        },
+      ),
+      const SizedBox(width: 10),
+      PhoneButton(
+        icon: Icons.check_rounded,
+        label: _confirmMark ? 'Tap again' : null,
+        semanticLabel: _confirmMark ? 'Tap again to mark the season watched' : 'Mark season watched',
+        height: upright ? 50 : 44,
+        onTap: _markSeason,
+      ),
+    ]);
+
+    final details = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      if (next != null) ...[
+        Text(showName,
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 15 : 14).copyWith(color: kSoft)),
+        const SizedBox(height: 4),
+        Text(next['Name']?.toString() ?? '',
+            maxLines: 2, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 24 : 22)),
+      ] else
+        Text(showName, maxLines: 2, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 30 : 26)),
+      if (meta.isNotEmpty) ...[
+        const SizedBox(height: 6),
+        Text(meta, style: phoneText(13, color: kMuted)),
+      ],
+      if (overview.isNotEmpty) ...[
+        const SizedBox(height: 8),
+        Text(overview,
+            maxLines: upright ? 3 : 2,
+            overflow: TextOverflow.ellipsis,
+            style: phoneText(14, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.45)),
+      ],
+      const SizedBox(height: 14),
+      buttons,
+      if (_markNote != null) ...[
+        const SizedBox(height: 8),
+        Text(_markNote!, style: phoneText(13, color: kSoft)),
+      ],
+    ]);
+
+    Widget status() {
+      if (_error != null && _seasons.isEmpty) {
+        return Text(_error!, style: phoneText(15, weight: FontWeight.w500, color: kSoft, height: 1.4));
+      }
+      if (_loading && _episodes.isEmpty) return Text('Loading…', style: phoneText(15, color: kMuted));
+      return Text('No episodes here.', style: phoneText(15, color: kMuted));
+    }
+
+    if (upright) {
+      const heroH = 300.0;
+      return Scaffold(
+        backgroundColor: kBg,
+        body: ListView(
+          padding: EdgeInsets.only(bottom: pad.bottom + 28),
+          physics: const BouncingScrollPhysics(),
+          children: [
+            SizedBox(
+              height: heroH,
+              child: Stack(fit: StackFit.expand, children: [
+                backdrop,
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0x8006080B), Color(0x0006080B), Color(0x0006080B), kBg],
+                      stops: [0, 0.3, 0.55, 1],
+                    ),
+                  ),
+                ),
+                _phoneBack(pad.top + 8, m.left - 4),
+              ]),
+            ),
+            Transform.translate(
+              offset: const Offset(0, -40),
+              child: Padding(padding: EdgeInsets.only(left: m.left, right: m.right), child: details),
+            ),
+            _phoneSeasons(m, 40),
+            const SizedBox(height: 12),
+            if (_episodes.isEmpty)
+              Padding(padding: EdgeInsets.only(left: m.left, right: m.right, top: 8), child: status())
+            else
+              for (final ep in _episodes)
+                Padding(
+                  padding: EdgeInsets.only(left: m.left - 6, right: m.right - 6, bottom: 4),
+                  child: _phoneEpisode(ep, thumbW: 132, row: false),
+                ),
+          ],
+        ),
+      );
+    }
+
+    // Sideways.
+    const thumbW = 176.0;
+    final nextIndex = next == null ? -1 : _episodes.indexWhere((e) => e['Id'] == next['Id']);
+    return Scaffold(
+      backgroundColor: kBg,
+      body: Stack(children: [
+        Positioned.fill(child: backdrop),
+        const Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xE606080B), Color(0x9906080B), Color(0x0006080B)],
+                stops: [0, 0.45, 0.75],
+              ),
+            ),
+          ),
+        ),
+        const Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Color(0x0006080B), Color(0x0006080B), kBg],
+                stops: [0, 0.45, 0.75],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          padding: EdgeInsets.only(top: pad.top + 64, bottom: pad.bottom + 20),
+          physics: const BouncingScrollPhysics(),
+          children: [
+            Padding(
+              padding: EdgeInsets.only(left: m.left),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(width: (size.width * 0.58).clamp(320.0, 520.0).toDouble(), child: details),
+              ),
+            ),
+            const SizedBox(height: 16),
+            _phoneSeasons(m, 34),
+            const SizedBox(height: 12),
+            if (_episodes.isEmpty)
+              Padding(padding: EdgeInsets.only(left: m.left, right: m.right), child: status())
+            else
+              SizedBox(
+                height: thumbW * 9 / 16 + 50,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: EdgeInsets.only(left: m.left, right: m.right),
+                  // Opens on the next episode to watch, not Episode 1.
+                  controller: _phoneRow ??= ScrollController(
+                      initialScrollOffset: nextIndex > 0 ? nextIndex * (thumbW + 12) : 0),
+                  itemCount: _episodes.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 12),
+                  itemBuilder: (_, i) => _phoneEpisode(_episodes[i], thumbW: thumbW, row: true),
+                ),
+              ),
+          ],
+        ),
+        _phoneBack(pad.top + 12, m.left),
+      ]),
     );
   }
 }

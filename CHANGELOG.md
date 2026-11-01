@@ -14,6 +14,14 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: show and movie pages made for the phone (stage 3).** Upright and sideways.
+  - Show page: the next episode to watch with Play / Resume, Watch together and Mark season
+    watched (tap twice), season pills, and the episodes (a list upright, a row sideways that
+    opens on the next one). Tap an episode to play it.
+  - Movie page: logo, year, length, rating, quality and genres; Play / Resume across the width,
+    Watch together, Mark watched and From the beginning; the summary (tap for all of it),
+    director and the cast with their photos.
+  - Coming back from a video, the page can turn upright again.
 - **iPhone: libraries made for the phone (stage 2).** Upright and sideways.
   - Library tabs scroll at the top; the library's name, how many titles and the current sort
     and filters, with Sort & filter beside it (white while a filter is on).

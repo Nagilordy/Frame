@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'gamepad.dart' show PadHint, PadButton, PadHints;
 import 'images.dart';
 import 'main.dart' show Jellyfin;
+import 'phone.dart';
 import 'syncplay.dart' show SyncPlay, playOrParty, startWatchTogether, watchTogetherButton;
 import 'ui.dart';
 
@@ -53,6 +54,8 @@ class _MovieScreenState extends State<MovieScreen> {
 
   Future<void> _play({bool fromStart = false}) async {
     await playOrParty(context, jf, _movie, startTicks: fromStart ? 0 : null);
+    // Phones: the player turned the phone sideways; this page can turn again.
+    if (mounted && isPhone(context)) phoneAnyOrientation();
     _load(); // where you stopped, watched or not
   }
 
@@ -105,6 +108,7 @@ class _MovieScreenState extends State<MovieScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (isPhone(context)) return _phoneBuild(context);
     final movie = _movie;
     final logo = jf.logoFor(movie);
     final title = Text(movie['Name']?.toString() ?? '', style: tvDisplay(64), maxLines: 2);
@@ -263,6 +267,311 @@ class _MovieScreenState extends State<MovieScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  // ---------- Phone layout ----------
+  //
+  // Upright: the artwork at the top, then the logo, details, Play (Resume) across the width,
+  // Watch together and Mark watched under it, the summary (tap for all of it) and the cast.
+  // Sideways: the TV page re-sized for a phone, artwork across the screen and everything on
+  // the left, scrolling if it doesn't fit.
+
+  bool _phoneRotationSet = false;
+  bool _fullSummary = false;
+
+  Widget _phoneBuild(BuildContext context) {
+    if (!_phoneRotationSet) {
+      _phoneRotationSet = true;
+      phoneAnyOrientation();
+    }
+    final size = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final upright = size.height > size.width;
+    final m = phoneMargins(context, min: upright ? 20 : 44);
+    final movie = _movie;
+    final logo = jf.logoFor(movie);
+    final name = movie['Name']?.toString() ?? '';
+    final title = Text(name, maxLines: 2, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 30 : 28));
+    final rating = movie['CommunityRating'] is num ? '★ ${(movie['CommunityRating'] as num).toStringAsFixed(1)}' : '';
+    final meta = [
+      movie['ProductionYear']?.toString() ?? '',
+      _runtime(movie),
+      movie['OfficialRating']?.toString() ?? '',
+      rating,
+    ].where((s) => s.isNotEmpty).join(' · ');
+    final quality = qualityLine(movie);
+    final genres = ((movie['Genres'] as List?) ?? const []).take(3).join(', ');
+    final overview = (movie['Overview'] ?? '').toString();
+    final people = (movie['People'] as List?) ?? const [];
+    final cast = people.where((p) => p['Type'] == 'Actor').take(12).toList();
+    final director = people.where((p) => p['Type'] == 'Director').take(2).map((p) => p['Name']).join(', ');
+    final progress = progressOf(movie);
+    final inParty = SyncPlay.of(jf).inParty;
+    final watched = isWatched(movie);
+    final backW = upright ? 400 * 16 / 9 : size.width;
+    final decode = phoneDecode(context, backW).clamp(640, 2560).toInt();
+
+    final playLabel = inParty ? 'Play for the party' : (progress > 0 ? 'Resume · ${minutesLeft(movie)} min left' : 'Play');
+    final play = PhoneButton(
+        primary: true, label: playLabel, icon: Icons.play_arrow_rounded, height: upright ? 52 : 44, onTap: _play);
+    final together = PhoneButton(
+      label: 'Watch together',
+      icon: Icons.people_alt_outlined,
+      height: upright ? 48 : 44,
+      onTap: () async {
+        await startWatchTogether(context, jf, movie);
+        if (mounted) phoneAnyOrientation();
+      },
+    );
+    final mark = PhoneButton(
+      label: upright ? (_markNote ?? (watched ? 'Watched' : 'Mark watched')) : null,
+      semanticLabel: watched ? 'Watched: tap to mark not watched' : 'Mark watched',
+      icon: watched ? Icons.check_circle_rounded : Icons.check_circle_outline_rounded,
+      height: upright ? 48 : 44,
+      onTap: _toggleWatched,
+    );
+    final fromStart = PhoneButton(
+      label: 'From the beginning',
+      icon: Icons.replay_rounded,
+      height: upright ? 44 : 40,
+      onTap: () => _play(fromStart: true),
+    );
+
+    final castRow = cast.isEmpty
+        ? const SizedBox.shrink()
+        : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(
+              padding: EdgeInsets.only(left: m.left, right: m.right, bottom: 10),
+              child: Text('Cast', style: phoneText(17, weight: FontWeight.w700)),
+            ),
+            SizedBox(
+              height: 96,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: EdgeInsets.only(left: m.left, right: m.right),
+                itemCount: cast.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 14),
+                itemBuilder: (_, i) {
+                  final p = cast[i];
+                  final face = phoneDecode(context, 64);
+                  return SizedBox(
+                    width: 72,
+                    child: Column(children: [
+                      ClipOval(
+                        child: SizedBox(
+                          width: 64,
+                          height: 64,
+                          child: p['PrimaryImageTag'] == null
+                              ? Container(
+                                  color: kPlaceholder,
+                                  alignment: Alignment.center,
+                                  child: Text('${p['Name'] ?? '?'} '.substring(0, 1),
+                                      style: phoneText(22, weight: FontWeight.w700, color: kMuted)),
+                                )
+                              : netImage(jf.image(p['Id'].toString(), 'Primary', maxWidth: face),
+                                  cacheWidth: face,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder)),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text((p['Name'] ?? '').toString(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: phoneText(12)),
+                    ]),
+                  );
+                },
+              ),
+            ),
+          ]);
+
+    final summary = overview.isEmpty
+        ? const SizedBox.shrink()
+        : GestureDetector(
+            onTap: () => setState(() => _fullSummary = !_fullSummary),
+            child: Text(overview,
+                maxLines: _fullSummary ? null : (upright ? 4 : 3),
+                overflow: _fullSummary ? TextOverflow.visible : TextOverflow.ellipsis,
+                style: phoneText(14, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.5)),
+          );
+
+    final heading = SizedBox(
+      height: upright ? 72 : 60,
+      child: Align(
+        alignment: Alignment.bottomLeft,
+        child: logo == null
+            ? title
+            : ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 300),
+                child: LogoImage(
+                    url: logo,
+                    height: upright ? 72 : 60,
+                    cacheHeight: phoneDecode(context, upright ? 72 : 60),
+                    fallback: title),
+              ),
+      ),
+    );
+
+    final info = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      heading,
+      const SizedBox(height: 10),
+      if (meta.isNotEmpty) Text(meta, style: phoneText(13, color: kSoft)),
+      if (quality.isNotEmpty || genres.isNotEmpty) ...[
+        const SizedBox(height: 4),
+        Text([quality, genres].where((s) => s.isNotEmpty).join(' · '), style: phoneText(13, color: kMuted)),
+      ],
+    ]);
+
+    final back = Positioned(
+      left: upright ? m.left - 4 : m.left,
+      top: pad.top + (upright ? 8 : 12),
+      child: Semantics(
+        button: true,
+        label: 'Back',
+        child: GestureDetector(
+          onTap: () {
+            phoneTap();
+            Navigator.of(context).maybePop();
+          },
+          child: Container(
+            width: 44,
+            height: 44,
+            decoration: const BoxDecoration(color: Color(0x8C06080B), shape: BoxShape.circle),
+            child: const Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: kFg),
+          ),
+        ),
+      ),
+    );
+
+    final backdrop = netImage(
+      jf.backdropFor(movie, maxWidth: decode),
+      cacheWidth: decode,
+      width: double.infinity,
+      height: double.infinity,
+      fit: BoxFit.cover,
+      alignment: upright ? Alignment.center : Alignment.topCenter,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => const ColoredBox(color: kPlaceholder),
+    );
+
+    if (upright) {
+      return Scaffold(
+        backgroundColor: kBg,
+        body: ListView(
+          padding: EdgeInsets.only(bottom: pad.bottom + 28),
+          physics: const BouncingScrollPhysics(),
+          children: [
+            SizedBox(
+              height: 400,
+              child: Stack(fit: StackFit.expand, children: [
+                backdrop,
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0x8006080B), Color(0x0006080B), Color(0x0006080B), kBg],
+                      stops: [0, 0.25, 0.55, 1],
+                    ),
+                  ),
+                ),
+                Positioned(left: m.left, right: m.right, bottom: 0, child: info),
+                back,
+              ]),
+            ),
+            Padding(
+              padding: EdgeInsets.fromLTRB(m.left, 18, m.right, 0),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                play,
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(child: together),
+                  const SizedBox(width: 10),
+                  Expanded(child: mark),
+                ]),
+                if (progress > 0) ...[
+                  const SizedBox(height: 10),
+                  fromStart,
+                  const SizedBox(height: 12),
+                  PhoneProgress(value: progress),
+                ],
+                const SizedBox(height: 18),
+                summary,
+                if (director.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text('Directed by $director', style: phoneText(13, color: kMuted)),
+                ],
+                const SizedBox(height: 22),
+              ]),
+            ),
+            castRow,
+          ],
+        ),
+      );
+    }
+
+    // Sideways.
+    final columnW = (size.width * 0.58).clamp(320.0, 520.0).toDouble();
+    return Scaffold(
+      backgroundColor: kBg,
+      body: Stack(children: [
+        Positioned.fill(child: backdrop),
+        const Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xE606080B), Color(0xA606080B), Color(0x0006080B)],
+                stops: [0, 0.5, 0.78],
+              ),
+            ),
+          ),
+        ),
+        ListView(
+          padding: EdgeInsets.only(top: pad.top + 64, bottom: pad.bottom + 20),
+          physics: const BouncingScrollPhysics(),
+          children: [
+            Padding(
+              padding: EdgeInsets.only(left: m.left),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: SizedBox(
+                  width: columnW,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    info,
+                    const SizedBox(height: 8),
+                    summary,
+                    const SizedBox(height: 14),
+                    Wrap(spacing: 10, runSpacing: 10, children: [
+                      play,
+                      together,
+                      mark,
+                      if (progress > 0) fromStart,
+                    ]),
+                    if (_markNote != null) ...[
+                      const SizedBox(height: 8),
+                      Text(_markNote!, style: phoneText(13, color: kSoft)),
+                    ],
+                    if (progress > 0) ...[
+                      const SizedBox(height: 12),
+                      SizedBox(width: 260, child: PhoneProgress(value: progress)),
+                    ],
+                    if (director.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text('Directed by $director', style: phoneText(13, color: kMuted)),
+                    ],
+                  ]),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            castRow,
+          ],
+        ),
+        back,
+      ]),
     );
   }
 }
