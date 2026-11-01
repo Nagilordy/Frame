@@ -13,7 +13,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'gamepad.dart' show PadHint, PadHints, PadButton, padActive, fullScreenHint;
-import 'ui.dart' show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent;
+import 'ui.dart' show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent, phoneSidewaysOnly;
 import 'main.dart' show Jellyfin;
 import 'banners.dart' show showBanner, bannerIcon;
 import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
@@ -757,6 +757,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    // Phones: video always plays sideways (the screen it came from sets its own again on return).
+    if (_phone) phoneSidewaysOnly();
     // Controls hide on their own only while playing; pausing keeps them up.
     _subs.add(player.stream.playing.listen((playing) {
       if (!mounted) return;

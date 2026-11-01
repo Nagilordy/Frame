@@ -232,6 +232,43 @@ class Frost extends StatelessWidget {
       Surface(radius: radius > 18 ? 18 : radius, padding: padding, child: child);
 }
 
+// ---------- Phones ----------
+//
+// On a phone (not a tablet, not a computer) the screens that have one use a touch layout in
+// real phone sizes instead of the 1920x1080 TV canvas, upright or sideways. Screens that don't
+// have one yet keep the TV canvas and turn the phone sideways while they're open.
+
+bool isPhone(BuildContext context) => !isDesktop && MediaQuery.sizeOf(context).shortestSide < 600;
+bool isUpright(BuildContext context) {
+  final s = MediaQuery.sizeOf(context);
+  return s.height > s.width;
+}
+
+/// A phone screen with a touch layout: upright and sideways both allowed.
+void phoneAnyOrientation() {
+  if (isDesktop) return;
+  SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
+}
+
+/// A TV-style screen (or the player) on a phone: sideways only.
+void phoneSidewaysOnly() {
+  if (isDesktop) return;
+  SystemChrome.setPreferredOrientations(const [
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
+}
+
+/// Side margin on a phone: at least [min], more where the camera cutout or rounded corners are.
+EdgeInsets phoneMargins(BuildContext context, {double min = 20}) {
+  final p = MediaQuery.paddingOf(context);
+  return EdgeInsets.only(left: p.left > min ? p.left : min, right: p.right > min ? p.right : min);
+}
+
 // ---------- The TV canvas ----------
 
 // How much bigger (or smaller) the screen is than the 1920x1080 design, so images can be
@@ -261,6 +298,13 @@ class TvCanvas extends StatefulWidget {
 
 class _TvCanvasState extends State<TvCanvas> {
   double _shift = 0; // how far the screen is slid up for the keyboard
+
+  @override
+  void initState() {
+    super.initState();
+    // Phones: this screen has no upright layout yet, so it turns sideways.
+    phoneSidewaysOnly();
+  }
 
   @override
   Widget build(BuildContext context) {

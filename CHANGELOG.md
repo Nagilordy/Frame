@@ -5,6 +5,15 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **iPhone: Home made for the phone (stage 1 of the phone design).** Home now has its own touch
+  layout in phone sizes instead of the shrunk TV screen, upright and sideways.
+  - Upright: artwork at the top with the title, Resume and Watch together, then Continue
+    watching and Recently added as rows you swipe through. Library tabs scroll sideways at the top.
+  - Sideways: the TV layout re-sized for a phone, artwork across the screen, the first row
+    peeking in at the bottom.
+  - Pull down to refresh. Every button gives a light tap you can feel.
+  - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
+    turn the phone sideways while they're open. Video always plays sideways.
 - **Watch parties.** A room that stays together between videos.
   - Start one from the Triangle menu on Home: "Start a watch party". Nothing has to play yet.
   - Friends get an invite on their Home and join with Triangle.

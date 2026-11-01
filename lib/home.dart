@@ -5,6 +5,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -15,7 +16,8 @@ import 'main.dart';
 import 'library.dart';
 import 'movie.dart' show MovieScreen;
 import 'images.dart';
-import 'profiles.dart' show ProfileChip, ProfileStore, WhoScreen, showProfileMenu;
+import 'phone.dart';
+import 'profiles.dart' show ProfileChip, ProfileStore, WhoScreen, showProfileMenu, accentFor;
 import 'syncplay.dart' show TogetherPill, startWatchTogether, watchTogetherButton, playOrParty;
 import 'ui.dart';
 
@@ -207,6 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       await playOrParty(context, jf, item); // for the party when you're in one
     }
+    _phoneBack();
     // Watched something from a show: its saved pages (next episode, progress) are out of date.
     final series = item['Type'] == 'Series' ? item['Id'] : item['SeriesId'];
     if (series != null) jf.forgetShow(series.toString());
@@ -217,6 +220,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openDetails(dynamic item) async {
     if (item?['Type'] != 'Movie') return _open(item);
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => MovieScreen(jf: jf, movie: item)));
+    _phoneBack();
     _load();
   }
 
@@ -308,6 +312,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Phones: a touch layout in phone sizes, upright or sideways (see _phoneHome).
+    if (isPhone(context)) return _phoneHome(context);
     final mq = MediaQuery.of(context);
     return Scaffold(
       backgroundColor: _bg,
@@ -524,6 +530,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _openLibrary(dynamic lib) async {
     await Navigator.of(context).push(MaterialPageRoute(
         builder: (_) => LibraryScreen(jf: jf, libraries: _libraries, library: lib)));
+    _phoneBack();
     _load();
     // Came back with L2 from another tab: if nothing on Home is selected, select Play.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -642,6 +649,280 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ]),
           ),
+    ]);
+  }
+
+  // ---------- Phone layout ----------
+  //
+  // Upright: the artwork fills the top of the screen with the title, Resume and Watch together
+  // over its bottom edge, then the rows. Sideways: the TV layout re-sized for a phone, artwork
+  // across the whole screen with the title on the left and the first row peeking in at the
+  // bottom. Everything scrolls with a finger; pull down at the top to refresh.
+
+  bool _phoneRotationSet = false;
+
+  // Back on Home after another screen (which may have turned the phone sideways).
+  void _phoneBack() {
+    if (mounted && isPhone(context)) phoneAnyOrientation();
+  }
+
+  Widget _phoneHome(BuildContext context) {
+    if (!_phoneRotationSet) {
+      _phoneRotationSet = true;
+      phoneAnyOrientation();
+    }
+    final size = MediaQuery.sizeOf(context);
+    final pad = MediaQuery.paddingOf(context);
+    final upright = size.height > size.width;
+    final m = phoneMargins(context, min: upright ? 20 : 44);
+    final heroH = upright
+        ? math.min(math.max(size.width * 1.42, 420.0), size.height * 0.72)
+        : size.height - 112;
+    // The artwork covers the hero area: upright, a wide picture is cropped to the middle.
+    final backW = upright ? heroH * 16 / 9 : size.width;
+    final decode = phoneDecode(context, backW).clamp(640, 2560).toInt();
+
+    final hero = SizedBox(
+      height: heroH,
+      child: Stack(fit: StackFit.expand, children: [
+        RepaintBoundary(
+          child: ValueListenableBuilder<dynamic>(
+            valueListenable: _featuredN,
+            builder: (context, featured, _) => AnimatedSwitcher(
+              duration: const Duration(milliseconds: 450),
+              child: featured == null
+                  ? const ColoredBox(key: ValueKey('none'), color: _bg)
+                  : netImage(
+                      jf.backdropFor(featured, maxWidth: decode),
+                      key: ValueKey(jf.backdropFor(featured, maxWidth: decode)),
+                      width: double.infinity,
+                      height: double.infinity,
+                      cacheWidth: decode,
+                      fit: BoxFit.cover,
+                      alignment: upright ? Alignment.center : Alignment.topCenter,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, __, ___) => const ColoredBox(color: _placeholder),
+                    ),
+            ),
+          ),
+        ),
+        // Dark at the top (tabs) and the bottom (title, then the rows), and on the left sideways.
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0x9906080B), Color(0x0006080B), Color(0x0006080B), Color(0xCC06080B), _bg],
+              stops: [0, 0.22, 0.45, 0.8, 1],
+            ),
+          ),
+        ),
+        if (!upright)
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xE006080B), Color(0x9906080B), Color(0x0006080B)],
+                stops: [0, 0.4, 0.72],
+              ),
+            ),
+          ),
+        Positioned(
+          left: 0,
+          right: 0,
+          top: pad.top + (upright ? 8 : 12),
+          child: _phoneTopBar(context, upright, m),
+        ),
+        if (_error != null || _loading || _featured == null)
+          Positioned(left: m.left, right: m.right, bottom: upright ? 8 : 40, child: _phoneStatus())
+        else if (upright)
+          Positioned(
+            left: m.left,
+            right: m.right,
+            bottom: 4,
+            child: ValueListenableBuilder<dynamic>(
+              valueListenable: _featuredN,
+              builder: (context, featured, _) =>
+                  featured == null ? const SizedBox.shrink() : _phoneHeroBlock(context, featured, true),
+            ),
+          )
+        else
+          Positioned(
+            left: m.left,
+            top: pad.top + 70,
+            width: (size.width * 0.55).clamp(300.0, 480.0).toDouble(),
+            child: ValueListenableBuilder<dynamic>(
+              valueListenable: _featuredN,
+              builder: (context, featured, _) =>
+                  featured == null ? const SizedBox.shrink() : _phoneHeroBlock(context, featured, false),
+            ),
+          ),
+      ]),
+    );
+
+    final cardW = upright ? 236.0 : 212.0;
+    return Scaffold(
+      backgroundColor: _bg,
+      body: RefreshIndicator(
+        onRefresh: _load,
+        color: _fg,
+        backgroundColor: const Color(0xFF151920),
+        edgeOffset: pad.top,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+          padding: EdgeInsets.only(bottom: pad.bottom + 28),
+          children: [
+            hero,
+            SizedBox(height: upright ? 26 : 8),
+            if (_error == null) ...[
+              PhoneMediaRow(
+                title: 'Continue watching',
+                items: _resume,
+                jf: jf,
+                padding: m,
+                cardWidth: cardW,
+                onTap: _open,
+              ),
+              if (_resume.isNotEmpty && _latest.isNotEmpty) const SizedBox(height: 22),
+              PhoneMediaRow(
+                title: 'Recently added',
+                items: _latest,
+                jf: jf,
+                padding: m,
+                cardWidth: cardW,
+                onTap: _openDetails,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // "Frame" and your avatar, with the library tabs under them (upright) or beside them (sideways).
+  Widget _phoneTopBar(BuildContext context, bool upright, EdgeInsets m) {
+    final avatar = PhoneAvatar(
+      name: jf.userName ?? '',
+      color: accentFor(jf.userId ?? '').$1,
+      size: upright ? 40 : 36,
+      onTap: () => showProfileMenu(context, jf),
+    );
+    final tabs = PhoneTabs(
+      libraries: _libraries,
+      currentId: null,
+      onHome: () {},
+      onLibrary: _openLibrary,
+      height: upright ? 38 : 36,
+      padding: EdgeInsets.only(left: m.left, right: upright ? m.right : 12),
+    );
+    if (!upright) {
+      return Row(children: [Expanded(child: tabs), avatar, SizedBox(width: m.right)]);
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(
+        padding: EdgeInsets.only(left: m.left, right: m.right),
+        child: Row(children: [
+          Text('Frame', style: phoneTitle(22)),
+          const Spacer(),
+          avatar,
+        ]),
+      ),
+      const SizedBox(height: 14),
+      tabs,
+    ]);
+  }
+
+  // Loading, connecting, or what went wrong (with Try again / Sign in).
+  Widget _phoneStatus() {
+    if (_error != null) {
+      final login = _error!.contains('Sign in again');
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Text(_error!, maxLines: 4, style: phoneText(16, weight: FontWeight.w500, color: _soft, height: 1.4)),
+        const SizedBox(height: 16),
+        PhoneButton(
+          primary: true,
+          height: 48,
+          label: login ? 'Sign in' : 'Try again',
+          onTap: login ? _signInAgain : _retry,
+        ),
+      ]);
+    }
+    final text = _loading
+        ? (_offlineTry > 0 ? 'Connecting to ${_serverName ?? 'your server'}…' : 'Loading your library…')
+        : 'Nothing here yet.';
+    return Text(text, style: phoneText(17, weight: FontWeight.w500, color: _muted));
+  }
+
+  Widget _phoneHeroBlock(BuildContext context, dynamic item, bool upright) {
+    final logo = jf.logoFor(item);
+    final logoH = upright ? 72.0 : 60.0;
+    final title = Text(_titleOf(item),
+        maxLines: 2, overflow: TextOverflow.ellipsis, style: phoneTitle(upright ? 34.0 : 30.0));
+    final ep = _episodeLine(item);
+    final year = item['ProductionYear']?.toString() ?? '';
+    final details = [year, _qualityLine(item)].where((s) => s.isNotEmpty).join(' · ');
+    final progress = _progress(item);
+    final label = item['Type'] == 'Series' ? 'Open' : (progress > 0 ? 'Resume' : 'Play');
+    final party = item['Type'] != 'Series';
+
+    final play = PhoneButton(
+      primary: true,
+      label: label,
+      icon: Icons.play_arrow_rounded,
+      height: upright ? 52 : 46,
+      onTap: () => _open(item),
+    );
+    final together = PhoneButton(
+      icon: Icons.people_alt_outlined,
+      label: upright ? null : 'Watch together',
+      semanticLabel: 'Watch together',
+      height: upright ? 52 : 46,
+      onTap: () async {
+        await startWatchTogether(context, jf, item);
+        _phoneBack();
+      },
+    );
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      SizedBox(
+        height: logoH,
+        child: Align(
+          alignment: Alignment.bottomLeft,
+          child: logo == null
+              ? title
+              : ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 300),
+                  child: LogoImage(
+                      url: logo, height: logoH, cacheHeight: phoneDecode(context, logoH), fallback: title),
+                ),
+        ),
+      ),
+      const SizedBox(height: 10),
+      if (upright) ...[
+        if (ep.isNotEmpty)
+          Text(ep, maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(15, weight: FontWeight.w500, color: _soft)),
+        if (details.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(details, style: phoneText(13, color: _muted)),
+        ],
+      ] else
+        Text([ep, details].where((s) => s.isNotEmpty).join(' · '),
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: phoneText(14, weight: FontWeight.w500, color: _soft)),
+      SizedBox(height: upright ? 16 : 14),
+      Row(children: [
+        if (upright) Expanded(child: play) else play,
+        if (party) ...[const SizedBox(width: 10), together],
+      ]),
+      if (progress > 0) ...[
+        const SizedBox(height: 12),
+        SizedBox(
+          width: upright ? double.infinity : 260,
+          child: Row(children: [
+            Expanded(child: PhoneProgress(value: progress)),
+            const SizedBox(width: 10),
+            Text('${_minutesLeft(item)} min left', style: phoneText(13, color: _muted)),
+          ]),
+        ),
+      ],
     ]);
   }
 }
