@@ -14,6 +14,7 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: Frame's name and icon** on the home screen, instead of the template's.
 - **iPhone: lighter and safer playback.**
   - The picture is drawn at the screen's size instead of the file's: a 4K movie no longer
     makes the phone draw 3840x2160 every frame. Less heat and battery, fewer dropped frames.
