@@ -4,6 +4,7 @@
 // Mouse: moving shows the controls, click buttons, click or drag the progress bar.
 
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -260,7 +261,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     List<({String url, String label, String? language, int index})> subtitles = const [];
     if (server) {
       try {
-        final stream = await widget.jf.serverStream(_id, audioIndex: _serverAudio, subtitleIndex: _serverSub);
+        final stream = await widget.jf.serverStream(_id,
+            audioIndex: _serverAudio, subtitleIndex: _serverSub, phone: Platform.isIOS || Platform.isAndroid);
         url = stream.url;
         session = stream.session;
         subtitles = stream.subtitles;
@@ -410,6 +412,47 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final video = streams.cast<dynamic>().firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
     return video != null && video['VideoRangeType'] == 'DOVI';
   }
+  // iPhone / iPad (and Android): only files a phone plays reliably go straight from the
+  // NAS (MP4 / MOV with H.264 or HEVC, normal or HDR10, and AAC / AC3 / E-AC3 / MP3 / FLAC /
+  // ALAC sound). Anything else (MKV, Dolby Vision, TrueHD, DTS, AV1…) is converted by the
+  // server, which the NAS does with its graphics chip. If even a "simple" file fails to open,
+  // playback falls back to the server's version (see _openSource).
+  Future<void> _phoneFallback(Duration? at) async {
+    // Give the original file a few seconds to show its first picture.
+    for (var i = 0; i < 16; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted || _server) return;
+      if ((player.state.width ?? 0) > 0 && player.state.duration > Duration.zero) return;
+    }
+    if (!mounted || _server) return;
+    debugPrint('Player: the original file did not open on this phone; trying the server\'s version');
+    _switching = true;
+    try {
+      await _openSource(server: true, at: at);
+    } finally {
+      _switching = false;
+    }
+  }
+
+  bool get _phoneNeedsServer {
+    if (!(Platform.isIOS || Platform.isAndroid)) return false;
+    final item = widget.item;
+    final container = (item['Container'] ?? '').toString().toLowerCase();
+    final streams = ((item['MediaStreams'] as List?) ?? []).cast<dynamic>();
+    final video = streams.firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
+    final audio = streams.firstWhere((s) => s['Type'] == 'Audio' && s['IsDefault'] == true,
+        orElse: () => streams.firstWhere((s) => s['Type'] == 'Audio', orElse: () => null));
+    final okContainer = container.split(',').any((c) => ['mp4', 'm4v', 'mov'].contains(c.trim()));
+    final vCodec = (video?['Codec'] ?? '').toString().toLowerCase();
+    final range = (video?['VideoRangeType'] ?? 'SDR').toString();
+    final okVideo = ['h264', 'hevc'].contains(vCodec) && !range.startsWith('DOVI');
+    final aCodec = (audio?['Codec'] ?? '').toString().toLowerCase();
+    final okAudio = audio == null || ['aac', 'ac3', 'eac3', 'mp3', 'flac', 'alac'].contains(aCodec);
+    final simple = okContainer && okVideo && okAudio;
+    if (!simple) debugPrint('Player: $container / $vCodec / $aCodec on a phone: using the server\'s version');
+    return !simple;
+  }
+
   int get _resumeTicks => widget.startTicks ?? (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
 
   // ---------- Remembering audio and subtitle choices (tracks.dart) ----------
@@ -839,7 +882,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final item = widget.item;
     final disc = (item['VideoType'] ?? 'VideoFile') != 'VideoFile' ||
         ['iso', 'bluray', 'dvd'].contains((item['Container'] ?? '').toString().toLowerCase());
-    final wantServer = disc || _mode == 'server' || (_mode == 'auto' && _level >= _serverStep);
+    final wantServer = disc ||
+        _mode == 'server' ||
+        (_mode == 'auto' && (_level >= _serverStep || _phoneNeedsServer));
     if (wantServer) _presetServerTracks();
     // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
     final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
@@ -847,6 +892,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _switching = true;
       final ok = await _openSource(server: wantServer, at: resume);
       if (!ok) await _openSource(server: false, at: resume); // server unavailable: original
+      // A phone that couldn't open the original file: the server's version instead.
+      if (!wantServer && (Platform.isIOS || Platform.isAndroid)) unawaited(_phoneFallback(resume));
     } catch (e) {
       _fail('$e');
       return;

@@ -19,7 +19,7 @@ import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'syncplay.dart' show SyncPlay;
-import 'ui.dart' show isDesktop, toggleFullScreen;
+import 'ui.dart' show isDesktop, toggleFullScreen, keyboardInset, kBg;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -109,7 +109,7 @@ class _TestAppState extends State<TestApp> {
       navigatorObservers: [_routes],
       // The controller legend floats above every screen.
       builder: (context, child) => Stack(children: [
-        if (child != null) child,
+        if (child != null) _phoneFrame(context, child),
         // While the controller is in use, the mouse is switched off inside the app: the
         // pointer is hidden and can't hover or click anything (so the controller's touchpad
         // can't interfere). A real click, the wheel, or moving the mouse a good distance
@@ -135,6 +135,32 @@ class _TestAppState extends State<TestApp> {
 
 // The new screen fades in over the first 60% of the transition (about 180 ms), then costs
 // nothing extra: a fully visible screen is drawn normally.
+// Phones and tablets: keep everything inside the safe area (away from the Dynamic Island,
+// the rounded corners and the home bar), and take the on-screen keyboard out of the layout so
+// screens aren't squeezed and rescaled when it opens (TvCanvas slides up instead, see
+// keyboardInset). Computers are unchanged.
+Widget _phoneFrame(BuildContext context, Widget child) {
+  if (isDesktop) return child;
+  final mq = MediaQuery.of(context);
+  final inset = mq.viewInsets.bottom;
+  if (keyboardInset.value != inset) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => keyboardInset.value = inset);
+  }
+  return ColoredBox(
+    color: kBg,
+    child: Padding(
+      padding: mq.padding,
+      child: MediaQuery(
+        data: mq
+            .removePadding(removeLeft: true, removeTop: true, removeRight: true, removeBottom: true)
+            .removeViewPadding(removeLeft: true, removeTop: true, removeRight: true, removeBottom: true)
+            .removeViewInsets(removeBottom: true),
+        child: child,
+      ),
+    ),
+  );
+}
+
 class _QuickFade extends PageTransitionsBuilder {
   const _QuickFade();
 
@@ -709,7 +735,7 @@ class Jellyfin {
   // audioIndex / subtitleIndex: Jellyfin's stream numbers for the chosen audio and subtitles.
   // Image subtitles (Blu-ray PGS, DVD) are drawn into the picture by the server.
   Future<({String url, String session, List<({String url, String label, String? language, int index})> subtitles})>
-      serverStream(String itemId, {int? audioIndex, int? subtitleIndex}) async {
+      serverStream(String itemId, {int? audioIndex, int? subtitleIndex, bool phone = false}) async {
     const maxBitrate = 120000000;
     final profile = {
       'Name': 'Frame',
@@ -720,8 +746,9 @@ class Jellyfin {
         {
           'Container': 'mp4',
           'Type': 'Video',
-          'VideoCodec': 'hevc,h264',
-          'AudioCodec': 'eac3,ac3,aac',
+          // Phones: H.264 first (every phone plays it); computers: HEVC first (smaller).
+          'VideoCodec': phone ? 'h264,hevc' : 'hevc,h264',
+          'AudioCodec': phone ? 'aac,eac3,ac3' : 'eac3,ac3,aac',
           'Protocol': 'hls',
           'Context': 'Streaming',
           'MaxAudioChannels': '6',

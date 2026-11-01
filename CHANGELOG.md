@@ -51,6 +51,19 @@ What changed in each version of Frame. Newest first.
   buttons above the grid: one "Sort & filter" button now, lit up while a filter is on.
 - **Error screen in the new style:** a centred card over the faded artwork of what you tried to
   play, with Retry (when the server was out of reach) and Back.
+- **iPhone (first fixes):**
+  - Everything stays inside the safe area: nothing under the Dynamic Island, the rounded
+    corners or the home bar.
+  - Typing no longer shrinks and rescales the whole screen when the keyboard opens; the screen
+    just slides up enough to keep the field you're typing in above the keyboard.
+  - Videos: files a phone plays reliably (MP4 / MOV, H.264 or HEVC, common sound formats) play
+    straight from the NAS; anything else (MKV, Dolby Vision, TrueHD, DTS, AV1…) uses the
+    server's converted version (H.264 first on phones). If an original file doesn't open
+    within a few seconds, Frame switches to the server's version by itself.
+- **Show page: full episode summaries.** When you move onto the episodes, the space above the row
+  switches to the selected episode: the show's name (small), the episode's name, "S17 · E19 ·
+  22 min · Aired Apr 30, 2006 · Ends at 12:26" and the whole summary (up to 6 lines). The cards
+  keep just the episode number and name. Going up to the seasons or buttons brings the show back.
 - **On-screen keyboard in the new style:** a full-width sheet from the bottom (like the player's
   panel and the PS5 keyboard), the field you're typing in at the top as a pill with the white
   ring, bigger rounded keys, the selected key white with the ring, and Done always lit.

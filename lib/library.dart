@@ -815,9 +815,21 @@ class _ShowScreenState extends State<ShowScreen> {
   final _tabNodes = FocusNodeList('Show: Season tab');
   final _epNodes = FocusNodeList('Show: Episode');
   int _lastEp = -1; // the episode that had focus last, so coming back down returns to it
+  // The episode selected in the row: its name, details and whole summary replace the show's
+  // above the row (the cards keep just the number and name).
+  dynamic _shownEp;
 
   void _setHero(bool hero) {
-    if (_hero != hero) setState(() => _hero = hero);
+    if (_hero != hero || (hero && _shownEp != null)) {
+      setState(() {
+        _hero = hero;
+        if (hero) _shownEp = null;
+      });
+    }
+  }
+
+  void _showShowInfo() {
+    if (_shownEp != null) setState(() => _shownEp = null);
   }
 
   bool _focusBelowButtons() => _seasons.length > 1 ? focusOn(_tabNodes[_season]) : _focusEpisode();
@@ -833,7 +845,15 @@ class _ShowScreenState extends State<ShowScreen> {
     return focusOn(_epNodes[i]) || _epNodes.focusFirstVisible();
   }
 
-  bool _focusAboveEpisodes() => _seasons.length > 1 ? focusOn(_tabNodes[_season]) : focusOn(_playNode);
+  bool _focusAboveEpisodes() {
+    if (_seasons.length > 1) return focusOn(_tabNodes[_season]);
+    // the buttons come back with the show's details; focus them once they're there
+    _showShowInfo();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) focusOn(_playNode);
+    });
+    return true;
+  }
 
   @override
   void dispose() {
@@ -979,6 +999,7 @@ class _ShowScreenState extends State<ShowScreen> {
       _season = i;
       _episodes = [];
       _lastEp = -1;
+      _shownEp = null;
       _loading = true;
     });
     if (cached) {
@@ -1127,7 +1148,12 @@ class _ShowScreenState extends State<ShowScreen> {
               left: 120,
               top: _hero ? 470 : 140,
               width: 1000,
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                layoutBuilder: (current, previous) => Stack(alignment: Alignment.topLeft, children: [...previous, if (current != null) current]),
+                child: (!_hero && _shownEp != null)
+                    ? KeyedSubtree(key: ValueKey('ep ${_shownEp['Id']}'), child: _episodeAbout(_shownEp, series))
+                    : KeyedSubtree(key: const ValueKey('show'), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 SizedBox(
                   height: 120,
                   child: Align(
@@ -1215,7 +1241,8 @@ class _ShowScreenState extends State<ShowScreen> {
                   ]),
                   ),
                 ),
-              ]),
+              ])),
+              ),
             ),
             // Seasons and episodes peek in at the bottom over the full artwork, and rise when
             // focus moves down into them.
@@ -1261,6 +1288,43 @@ class _ShowScreenState extends State<ShowScreen> {
     );
   }
 
+  static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  // Above the row while an episode is selected: the show (small), the episode's name, its
+  // details and its whole summary.
+  Widget _episodeAbout(dynamic ep, dynamic series) {
+    final mins = runtimeMinutes(ep);
+    final aired = DateTime.tryParse((ep['PremiereDate'] ?? '').toString());
+    final left = (mins * (1 - progressOf(ep))).round();
+    final ends = DateTime.now().add(Duration(minutes: left));
+    final line = [
+      if (ep['ParentIndexNumber'] != null) 'S${ep['ParentIndexNumber']}',
+      if (ep['IndexNumber'] != null) 'E${ep['IndexNumber']}',
+      if (mins > 0) '$mins min',
+      if (aired != null) 'Aired ${_months[aired.month - 1]} ${aired.day}, ${aired.year}',
+      if (mins > 0) 'Ends at ${ends.hour.toString().padLeft(2, '0')}:${ends.minute.toString().padLeft(2, '0')}',
+    ].join(' · ');
+    final overview = (ep['Overview'] ?? '').toString();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(series['Name']?.toString() ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: tvDisplay(34).copyWith(color: kSoft)),
+      const SizedBox(height: 6),
+      Text(ep['Name']?.toString() ?? '', maxLines: 2, overflow: TextOverflow.ellipsis, style: tvDisplay(52)),
+      const SizedBox(height: 10),
+      Text(line, style: tvBody(24, color: kSoft)),
+      if (overview.isNotEmpty) ...[
+        const SizedBox(height: 14),
+        SizedBox(
+          width: 900,
+          child: Text(overview,
+              maxLines: 6,
+              overflow: TextOverflow.ellipsis,
+              style: tvBody(23, weight: FontWeight.w400, color: const Color(0xFFC3C9D3), height: 1.5)),
+        ),
+      ],
+    ]);
+  }
+
   Widget _seasonTabs() {
     if (_seasons.length <= 1) return const SizedBox.shrink();
     return FocusTraversalGroup(
@@ -1275,6 +1339,7 @@ class _ShowScreenState extends State<ShowScreen> {
               onSelect: () => _pickSeason(i),
               // Moving across the tabs with the controller shows each season's episodes.
               onFocus: (viaMouse) {
+                _showShowInfo();
                 if (!viaMouse) {
                   _setHero(false);
                   _pickSeason(i);
@@ -1351,11 +1416,11 @@ class _ShowScreenState extends State<ShowScreen> {
           final watched = isWatched(ep);
           final progress = progressOf(ep);
           final mins = runtimeMinutes(ep);
-          final overview = (ep['Overview'] ?? '').toString();
           return Focusable(
             focusNode: _epNodes[i],
             onFocus: (viaMouse) {
               _lastEp = i;
+              if (_shownEp != ep) setState(() => _shownEp = ep);
               if (!viaMouse) _setHero(false);
             },
             onSelect: () => _play(ep),
@@ -1435,13 +1500,6 @@ class _ShowScreenState extends State<ShowScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: tvBody(23, weight: FontWeight.w700, color: f ? kFg : kSoft)),
-                if (overview.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(overview,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: tvBody(19, weight: FontWeight.w400, color: const Color(0xFFA8B0BD), height: 1.4)),
-                ],
               ]),
             ),
           );

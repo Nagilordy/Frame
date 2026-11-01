@@ -245,22 +245,50 @@ int sizeBucket(int px) => ((px + 159) ~/ 160) * 160;
 
 // Lays out a screen as if it were 1920x1080, scaled to the window, and stretched to fill the
 // window's real shape so wider or taller windows get more room instead of black bars.
-class TvCanvas extends StatelessWidget {
+/// Phones and tablets: how tall the on-screen keyboard is right now (0 when it's closed).
+/// The app root takes the keyboard out of the layout (so screens are never squeezed and
+/// rescaled when it opens) and reports its height here instead; TvCanvas then slides the
+/// screen up just enough to keep the field being typed in above the keyboard.
+final keyboardInset = ValueNotifier<double>(0);
+
+class TvCanvas extends StatefulWidget {
   const TvCanvas({super.key, required this.child});
   final Widget child;
 
   @override
+  State<TvCanvas> createState() => _TvCanvasState();
+}
+
+class _TvCanvasState extends State<TvCanvas> {
+  double _shift = 0; // how far the screen is slid up for the keyboard
+
+  @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
-    return LayoutBuilder(builder: (context, box) {
+    final canvas = LayoutBuilder(builder: (context, box) {
       final w = box.maxWidth, h = box.maxHeight;
       final scale = (w / 1920) < (h / 1080) ? w / 1920 : h / 1080;
       tvDecodeScale = (scale * mq.devicePixelRatio).clamp(0.5, 2.0);
       return FittedBox(
         fit: BoxFit.fill,
-        child: SizedBox(width: w / scale, height: h / scale, child: child),
+        child: SizedBox(width: w / scale, height: h / scale, child: widget.child),
       );
     });
+    if (isDesktop) return canvas;
+    return ValueListenableBuilder<double>(
+      valueListenable: keyboardInset,
+      builder: (context, inset, _) {
+        var shift = 0.0;
+        final r = inset > 0 ? FocusManager.instance.primaryFocus?.rect : null;
+        if (r != null) {
+          final visibleBottom = mq.size.height - inset;
+          final bottom = r.bottom + _shift; // where the field is without the slide
+          if (bottom + 24 > visibleBottom) shift = bottom + 24 - visibleBottom;
+        }
+        _shift = shift;
+        return ClipRect(child: Transform.translate(offset: Offset(0, -shift), child: canvas));
+      },
+    );
   }
 }
 
