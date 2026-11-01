@@ -4,6 +4,7 @@
 // Mouse: moving shows the controls, click buttons, click or drag the progress bar.
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -85,7 +86,7 @@ class PlayerScreen extends StatefulWidget {
 
 enum _Panel { none, playback, audio, subtitles }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver {
   // A larger buffer keeps more of the file ready, which helps smoothness and seeking over the network.
   late final Player player = Player(
     configuration: PlayerConfiguration(
@@ -754,6 +755,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.initState();
     // Phones: video always plays sideways (the screen it came from sets its own again on return).
     if (_phone) phoneSidewaysOnly();
+    if (_phone) {
+      // Leaving the app pauses the video (see "Leaving the app").
+      WidgetsBinding.instance.addObserver(this);
+      // Draw the picture at the screen's size, not the file's (see "Drawing at screen size").
+      _subs.add(player.stream.width.listen((_) => _fitOutput()));
+      _subs.add(player.stream.height.listen((_) => _fitOutput()));
+    }
     // Controls hide on their own only while playing; pausing keeps them up.
     _subs.add(player.stream.playing.listen((playing) {
       if (!mounted) return;
@@ -1010,6 +1018,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     widget.sync?.playerClosed(); // still in the party, just not watching
     _failFocus.dispose();
     if (_failure == null || _session != null) widget.jf.reportStopped(_id, _ticksNow, session: _session);
+    if (_phone) WidgetsBinding.instance.removeObserver(this);
+    _tapTimer?.cancel();
     player.dispose();
     _rootFocus.dispose();
     _playFocus.dispose();
@@ -1388,6 +1398,79 @@ class _PlayerScreenState extends State<PlayerScreen> {
         // Subtitles are drawn by mpv onto the video itself, so the plain text version is off.
         subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
       );
+
+  // ---------- Phones: drawing at screen size ----------
+  //
+  // mpv draws each frame at the size it's asked for, which is the file's size by default: a 4K
+  // movie is drawn at 3840x2160 every frame, though an iPhone screen sideways is about
+  // 2556x1179. Asking for the screen's size instead (keeping the video's shape, just covering
+  // the screen so a pinch to fill stays sharp) cuts the drawing work by more than half for 4K:
+  // less heat, less battery, fewer dropped frames. Smaller videos are left as they are.
+
+  int? _outW, _outH;
+
+  Future<void> _fitOutput() async {
+    final vw = player.state.width, vh = player.state.height;
+    if (vw == null || vh == null || vw <= 0 || vh <= 0) return;
+    final view = WidgetsBinding.instance.platformDispatcher.views.first;
+    final sw = math.max(view.physicalSize.width, view.physicalSize.height);
+    final sh = math.min(view.physicalSize.width, view.physicalSize.height);
+    if (sw <= 0 || sh <= 0) return;
+    final scale = math.min(1.0, math.max(sw / vw, sh / vh));
+    if (scale > 0.97) return; // already about the screen's size
+    final w = (vw * scale).round() & ~1, h = (vh * scale).round() & ~1;
+    if (w == _outW && h == _outH) return;
+    _outW = w;
+    _outH = h;
+    try {
+      final out = await controller.platform.future;
+      await out.setSize(width: w, height: h);
+      _note('drawing at ${w}x$h for this screen (the video is ${vw}x$vh)');
+    } catch (e) {
+      _note('could not draw at screen size ($e)');
+    }
+  }
+
+  // ---------- Phones: leaving the app ----------
+  //
+  // iOS doesn't let an app draw with the GPU (OpenGL, which mpv uses) while it's in the
+  // background, and stops apps that try. So when Frame leaves the screen (home, another app,
+  // the phone locked), the video pauses and mpv stops decoding the picture. Coming back, the
+  // picture returns where it was, paused, with the controls up. In a watch party the video
+  // isn't paused (that would pause everyone); only the picture stops while you're away.
+
+  bool _away = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_phone) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden) {
+      _leaveApp();
+    } else if (state == AppLifecycleState.resumed) {
+      _backToApp();
+    }
+  }
+
+  Future<void> _leaveApp() async {
+    if (_away) return;
+    _away = true;
+    if (_held) _phoneHold(false);
+    try {
+      if (_room == null && player.state.playing) await player.pause();
+      final mpv = player.platform;
+      if (mpv is NativePlayer) await mpv.setProperty('vid', 'no');
+    } catch (_) {}
+  }
+
+  Future<void> _backToApp() async {
+    if (!_away) return;
+    _away = false;
+    try {
+      final mpv = player.platform;
+      if (mpv is NativePlayer) await mpv.setProperty('vid', 'auto');
+    } catch (_) {}
+    if (mounted) _showControls();
+  }
 
   // ---------- Phones: touch and phone-sized controls ----------
   //

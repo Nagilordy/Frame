@@ -14,6 +14,12 @@ What changed in each version of Frame. Newest first.
   - Pull down to refresh. Every button gives a light tap you can feel.
   - Screens that don't have a phone layout yet (libraries, show and movie pages, profiles)
     turn the phone sideways while they're open. Video always plays sideways.
+- **iPhone: lighter and safer playback.**
+  - The picture is drawn at the screen's size instead of the file's: a 4K movie no longer
+    makes the phone draw 3840x2160 every frame. Less heat and battery, fewer dropped frames.
+  - Leaving Frame while a video plays (home, another app, locking the phone) pauses it and
+    stops the picture, since iOS stops apps that draw with the GPU in the background. Coming
+    back, it's where you left it. In a watch party the video keeps going for the others.
 - **iPhone: the player made for touch (stage 4).** Video still plays sideways.
   - Tap shows or hides the controls. Double-tap the left or right side: back 10 s or forward
     30 s, keep tapping to add more (shown on screen). Double-tap the middle: play or pause.
