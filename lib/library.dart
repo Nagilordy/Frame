@@ -12,7 +12,7 @@ import 'syncplay.dart' show startWatchTogether, watchTogetherButton, playOrParty
 import 'images.dart';
 import 'movie.dart' show MovieScreen;
 import 'phone.dart';
-import 'downloads.dart' show DownloadButton, Downloads;
+import 'downloads.dart' show DownloadButton, Downloads, downloadTag;
 import 'profiles.dart' show showProfileMenu, accentFor;
 import 'ui.dart';
 
@@ -2027,8 +2027,14 @@ class _ShowScreenState extends State<ShowScreen> {
         ]),
       ),
     );
-    final meta = Text('EPISODE ${ep['IndexNumber'] ?? '?'}${mins > 0 ? ' · $mins MIN' : ''}',
-        style: phoneText(11, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 0.8));
+    final meta = ListenableBuilder(
+      listenable: Downloads.instance,
+      builder: (context, _) => Text(
+          'EPISODE ${ep['IndexNumber'] ?? '?'}${mins > 0 ? ' · $mins MIN' : ''}${downloadTag(ep['Id'].toString()).toUpperCase()}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: phoneText(11, weight: FontWeight.w700, color: kMuted).copyWith(letterSpacing: 0.8)),
+    );
     final name = Text(ep['Name']?.toString() ?? '',
         maxLines: row ? 1 : 2,
         overflow: TextOverflow.ellipsis,
@@ -2056,7 +2062,7 @@ class _ShowScreenState extends State<ShowScreen> {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [meta, const SizedBox(height: 4), name]),
               ),
-              DownloadButton(jf: jf, item: ep, compact: true),
+              Transform.translate(offset: const Offset(6, 0), child: DownloadButton(jf: jf, item: ep)),
             ]),
           );
     return GestureDetector(

@@ -367,7 +367,7 @@ class DownloadButton extends StatefulWidget {
   const DownloadButton({super.key, required this.jf, required this.item, this.compact = false, this.height = 48});
   final Jellyfin jf;
   final dynamic item;
-  final bool compact; // a round icon only (episode rows)
+  final bool compact; // kept for older call sites; every download control is now the quiet icon
   final double height;
 
   @override
@@ -409,52 +409,70 @@ class _DownloadButtonState extends State<DownloadButton> {
       builder: (context, _) {
         final d = Downloads.instance.of(widget.item['Id'].toString());
         final status = d?.status;
-        final IconData icon;
         final String label;
         if (d == null || status == 'failed') {
-          icon = Icons.download_rounded;
           label = status == 'failed' ? 'Try again' : 'Download';
         } else if (d.done) {
-          icon = Icons.download_done_rounded;
           label = 'Downloaded';
         } else if (status == 'paused') {
-          icon = Icons.play_arrow_rounded;
           label = 'Paused · ${(d.progress * 100).round()}%';
         } else {
-          icon = Icons.pause_rounded;
           label = status == 'queued' ? 'Waiting…' : '${(d.progress * 100).round()}%';
         }
-        if (widget.compact) {
-          final running = status == 'running' || status == 'queued';
-          return Semantics(
-            button: true,
-            label: label,
-            child: GestureDetector(
-              onTap: () => _tap(d),
-              child: SizedBox(
-                width: 44,
-                height: 44,
-                child: Stack(alignment: Alignment.center, children: [
-                  if (running || status == 'paused')
-                    SizedBox(
-                      width: 30,
-                      height: 30,
-                      child: CircularProgressIndicator(
-                        value: d!.progress > 0 ? d.progress : null,
-                        strokeWidth: 2.5,
-                        color: kFg,
-                        backgroundColor: const Color(0x33F4F5F7),
-                      ),
-                    ),
-                  Icon(icon, size: running || status == 'paused' ? 16 : 22, color: d?.done == true ? kFg : kSoft),
-                ]),
+        // A quiet grey icon, no button shape: arrow, thin ring while downloading, tick when saved.
+        final busy = status == 'running' || status == 'queued' || status == 'paused';
+        final Widget glyph;
+        if (busy) {
+          glyph = Stack(alignment: Alignment.center, children: [
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                value: d!.progress > 0 ? d.progress : null,
+                strokeWidth: 2,
+                color: kMuted,
+                backgroundColor: const Color(0x26F4F5F7),
               ),
             ),
-          );
+            Icon(status == 'paused' ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 12, color: kMuted),
+          ]);
+        } else if (d?.done == true) {
+          glyph = const Icon(Icons.check_rounded, size: 19, color: _quiet);
+        } else if (status == 'failed') {
+          glyph = const Icon(Icons.refresh_rounded, size: 19, color: _quiet);
+        } else {
+          glyph = const Icon(Icons.download_rounded, size: 19, color: _quiet);
         }
-        return PhoneButton(label: label, icon: icon, height: widget.height, onTap: () => _tap(d));
+        return Semantics(
+          button: true,
+          label: label,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => _tap(d),
+            child: SizedBox(width: 44, height: 44, child: Center(child: glyph)),
+          ),
+        );
       },
     );
+  }
+}
+
+const _quiet = Color(0xFF8A919C);
+
+/// A short note for the end of a meta line: " · 42%", " · Paused", " · Downloaded", or "".
+String downloadTag(String itemId) {
+  final d = Downloads.instance.of(itemId);
+  if (d == null) return '';
+  if (d.done) return ' · Downloaded';
+  switch (d.status) {
+    case 'paused':
+      return ' · Paused';
+    case 'queued':
+      return ' · Waiting';
+    case 'failed':
+      return ' · Download failed';
+    default:
+      return ' · ${(d.progress * 100).round()}%';
   }
 }
 

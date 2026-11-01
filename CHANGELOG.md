@@ -17,6 +17,9 @@ What changed in each version of Frame. Newest first.
 - **Downloads (step 1: original files).** Watch without the server, on a plane or anywhere.
   - Download on a movie page and on each episode of a show page (phones). Shown only to
     profiles allowed to download ("Allow media downloading" in the Jellyfin dashboard).
+    It's a small grey icon, not a button: beside the year and quality lines on a movie, at the
+    end of each episode row. An arrow to start, a thin ring while it downloads (tap to pause),
+    a tick when it's on the phone. The line next to it adds "· 42%", "· Paused" or "· Downloaded".
   - The original file, in full quality, with its details and artwork. Downloads keep going
     with Frame closed, pause and resume, retry after a dropped connection, and notify when
     done. Wi-Fi only by default (a switch on the Downloads screen).

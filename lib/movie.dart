@@ -9,7 +9,7 @@ import 'gamepad.dart' show PadHint, PadButton, PadHints;
 import 'images.dart';
 import 'main.dart' show Jellyfin;
 import 'phone.dart';
-import 'downloads.dart' show DownloadButton;
+import 'downloads.dart' show DownloadButton, Downloads, downloadTag;
 import 'syncplay.dart' show SyncPlay, playOrParty, startWatchTogether, watchTogetherButton;
 import 'ui.dart';
 
@@ -419,11 +419,24 @@ class _MovieScreenState extends State<MovieScreen> {
     final info = Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       heading,
       const SizedBox(height: 10),
-      if (meta.isNotEmpty) Text(meta, style: phoneText(13, color: kSoft)),
-      if (quality.isNotEmpty || genres.isNotEmpty) ...[
-        const SizedBox(height: 4),
-        Text([quality, genres].where((s) => s.isNotEmpty).join(' · '), style: phoneText(13, color: kMuted)),
-      ],
+      Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            if (meta.isNotEmpty) Text(meta, style: phoneText(13, color: kSoft)),
+            if (meta.isNotEmpty) const SizedBox(height: 4),
+            ListenableBuilder(
+              listenable: Downloads.instance,
+              builder: (context, _) {
+                final line = [quality, genres].where((s) => s.isNotEmpty).join(' · ');
+                final tag = downloadTag(movie['Id'].toString());
+                final text = line.isEmpty && tag.isNotEmpty ? tag.substring(3) : line + tag;
+                return text.isEmpty ? const SizedBox.shrink() : Text(text, style: phoneText(13, color: kMuted));
+              },
+            ),
+          ]),
+        ),
+        Transform.translate(offset: const Offset(10, 0), child: DownloadButton(jf: jf, item: movie)),
+      ]),
     ]);
 
     final back = Positioned(
@@ -493,8 +506,6 @@ class _MovieScreenState extends State<MovieScreen> {
                   const SizedBox(width: 10),
                   Expanded(child: mark),
                 ]),
-                const SizedBox(height: 10),
-                DownloadButton(jf: jf, item: movie, height: 48),
                 if (progress > 0) ...[
                   const SizedBox(height: 10),
                   fromStart,
@@ -551,7 +562,6 @@ class _MovieScreenState extends State<MovieScreen> {
                       play,
                       together,
                       mark,
-                      DownloadButton(jf: jf, item: movie, height: 44),
                       if (progress > 0) fromStart,
                     ]),
                     if (_markNote != null) ...[
