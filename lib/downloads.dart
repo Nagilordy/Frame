@@ -256,8 +256,6 @@ class Downloads extends ChangeNotifier {
         case TaskStatus.notFound:
         case TaskStatus.canceled:
           d.status = 'failed';
-        default:
-          break;
       }
       _changed();
     } else if (u is TaskProgressUpdate) {

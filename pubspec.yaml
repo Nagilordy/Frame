@@ -19,6 +19,8 @@ dependencies:
   path_provider: ^2.1.4
   # Downloads that keep going with the app closed (iOS background transfers), pause/resume.
   background_downloader: ">=8.5.0 <10.0.0"
+  # Crash and problem reports, only when a build is given a Sentry address (crash_reports.dart).
+  sentry_flutter: ^9.6.0
 
 dev_dependencies:
   flutter_test:

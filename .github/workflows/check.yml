@@ -1,5 +1,6 @@
 # Checks Frame's code on every upload to main (and every pull request), in about two minutes:
-# - flutter analyze: finds code that wouldn't build (an error fails the check; style hints don't)
+# - flutter analyze: finds code that wouldn't build or is likely wrong (errors and warnings fail
+#   the check; style hints don't)
 # - flutter test: the automated tests in test/ (playback rules, tracks, downloads, item text)
 # A red ✗ next to a commit on GitHub means one of these failed: the build would break or a rule
 # changed. Nothing here needs a phone or a Mac.
@@ -27,7 +28,7 @@ jobs:
         run: flutter pub get
 
       - name: Look for code that wouldn't build
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        run: flutter analyze --no-fatal-infos
 
       - name: Run the automated tests
         run: flutter test --reporter expanded

@@ -25,6 +25,7 @@ import 'perf.dart' show perfLog;
 import 'tracks.dart';
 import 'phone.dart';
 import 'playback_rules.dart';
+import 'crash_reports.dart' show reportProblem;
 import 'downloads.dart' show Downloads;
 
 // ---------- Look (same palette as the home screen) ----------
@@ -821,6 +822,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       _note('video surface ready after ${watch.elapsedMilliseconds} ms');
     } catch (e) {
       _note('video surface NOT ready after ${watch.elapsedMilliseconds} ms ($e); starting anyway');
+      reportProblem('Video surface not ready', details: {'error': '$e'.split('\n').first});
       if ('$e'.contains('MissingPluginException')) {
         _note('this copy of Frame was built without its video player part (build $_build): '
             'no picture for any video, original or server. Install the newest build.');
@@ -875,6 +877,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     if (!mounted || _failure != null || _switching) return;
     _openTimer?.cancel();
     debugPrint('Playback failed: $message');
+    reportProblem('Playback failed: $message', details: {
+      'source': _server ? 'server' : 'original',
+      'mode': _mode,
+      'dolby_vision_5': _isDolbyVisionOnly,
+      'container': widget.item['Container'],
+      'quality': _qualityLine(widget.item),
+      'downloaded': Downloads.instance.localFile(_id) != null,
+      'mpv_log': _phoneLog.isEmpty ? null : _phoneLog.last,
+    });
     setState(() => _failure = message);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _failFocus.requestFocus();

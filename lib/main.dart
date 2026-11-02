@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'banners.dart' show bannerHandlesKey;
+import 'crash_reports.dart' show startWithCrashReports;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
@@ -35,7 +36,8 @@ Future<void> main() async {
   tidyArtworkCache();
   // Keep more artwork in memory so going back to a card shows it instantly.
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
-  runApp(const TestApp());
+  // Crash reports (only in builds given a Sentry address, see crash_reports.dart).
+  await startWithCrashReports(() => runApp(const TestApp()));
   PerfRecorder.start();
 }
 

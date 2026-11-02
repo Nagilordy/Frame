@@ -35,7 +35,7 @@ const _sorts = [
 const _letters = ['#', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
   'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
 
-enum _Picker { none, sort, genre }
+enum _Picker { none, sort }
 
 // ---------- Library grid ----------
 

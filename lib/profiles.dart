@@ -931,9 +931,6 @@ class _SignInScreenState extends State<SignInScreen> {
     }
   }
 
-  String _spaced(String code) =>
-      code.length == 6 ? '${code.substring(0, 3)} ${code.substring(3)}' : code;
-
   @override
   Widget build(BuildContext context) {
     final p = widget.profile;

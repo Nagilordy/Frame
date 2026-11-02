@@ -26,7 +26,7 @@ jobs:
       - name: Look for code that wouldn't build, and run the tests
         run: |
           flutter pub get
-          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter analyze --no-fatal-infos
           flutter test
 
       - name: Create the iPhone project files
