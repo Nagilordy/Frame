@@ -828,6 +828,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       _note('video surface ready after ${watch.elapsedMilliseconds} ms');
     } catch (e) {
       _note('video surface NOT ready after ${watch.elapsedMilliseconds} ms ($e); starting anyway');
+      if ('$e'.contains('MissingPluginException')) {
+        _note('this copy of Frame was built without its video player part (build $_build): '
+            'no picture for any video, original or server. Install the newest build.');
+      }
     }
     if (mounted) _start();
   }

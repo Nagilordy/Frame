@@ -71,6 +71,20 @@ jobs:
           ls build/ios/iphoneos/Runner.app/Frameworks
           ls build/ios/iphoneos/Runner.app/Frameworks | grep -qi '^mpv' || echo "::warning::Mpv framework not found in the app: video may not play"
 
+      # The video plugin has a "stub" version with no player inside, used when it can't find the
+      # mpv libraries at build time. An app built with it opens videos with sound but no picture
+      # ("MissingPluginException ... VideoOutputManager.Create"). Stop here instead of shipping it.
+      - name: Check the real video plugin is inside (not the empty stub)
+        run: |
+          bin=build/ios/iphoneos/Runner.app/Frameworks/media_kit_video.framework/media_kit_video
+          if [ ! -f "$bin" ]; then echo "::error::media_kit_video.framework is missing from the app"; exit 1; fi
+          if strings "$bin" | grep -q 'VideoOutputManager.Create'; then
+            echo "Video plugin OK (real player inside)"
+          else
+            echo "::error::The video plugin is the empty stub: videos would play with no picture. Not packaging this build."
+            exit 1
+          fi
+
       - name: Package as an IPA
         run: |
           mkdir -p Payload
