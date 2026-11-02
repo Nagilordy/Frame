@@ -22,6 +22,13 @@ jobs:
       - name: Use CocoaPods for plugins (needed for video)
         run: flutter config --no-enable-swift-package-manager
 
+      # Same checks as "Check code": stop in a minute instead of after a 5-minute build.
+      - name: Look for code that wouldn't build, and run the tests
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
+
       - name: Create the iPhone project files
         run: flutter create --platforms=ios --org com.kevin .
 

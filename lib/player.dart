@@ -24,6 +24,7 @@ import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
 import 'perf.dart' show perfLog;
 import 'tracks.dart';
 import 'phone.dart';
+import 'playback_rules.dart';
 import 'downloads.dart' show Downloads;
 
 // ---------- Look (same palette as the home screen) ----------
@@ -166,7 +167,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   final Map<int, String> _serverSubUrls = {};
 
   String get _levelKey => _isDolbyVisionOnly ? 'playbackStepDolbyVision' : 'playbackStep';
-  int get _serverStep => _isDolbyVisionOnly ? 1 : 2;
+  int get _serverStep => serverStepFor(widget.item);
   int get _maxLevel => _mode == 'original' ? _serverStep - 1 : _serverStep;
 
   Future<void> _loadLevel() async {
@@ -423,11 +424,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
   // Dolby Vision with no HDR10 or SDR picture inside (Profile 5). Jellyfin calls it "DOVI";
   // the kinds with a fallback picture are "DOVIWithHDR10", "DOVIWithSDR" and so on.
-  bool get _isDolbyVisionOnly {
-    final streams = (widget.item['MediaStreams'] as List?) ?? [];
-    final video = streams.cast<dynamic>().firstWhere((s) => s['Type'] == 'Video', orElse: () => null);
-    return video != null && video['VideoRangeType'] == 'DOVI';
-  }
+  bool get _isDolbyVisionOnly => isDolbyVisionOnly(widget.item);
   // Phones: if the original file shows no picture within a few seconds, switch to the server's
   // version by itself, at the same moment.
   Future<void> _phoneFallback(Duration? at) async {
@@ -447,6 +444,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
+  // (The rules themselves are in playback_rules.dart.)
   // iPhone / iPad (and Android), like the PC version: the original file straight from the NAS
   // whenever possible (MKV, HEVC, HDR, TrueHD, DTS, every kind of subtitle), and the server's
   // version only when the original can't work here:
@@ -454,11 +452,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   // - it stutters (see "Adapting to this device": the last step is the server's version), or
   // - it's Dolby Vision Profile 5, which would play but in pink and green without the
   //   server's colour conversion (the phone's player can't do it, unlike mpv on a PC).
-  bool get _phoneNeedsServer {
-    if (!(Platform.isIOS || Platform.isAndroid)) return false;
-    if (_isDolbyVisionOnly) debugPrint('Player: Dolby Vision Profile 5 on a phone: using the server\'s version');
-    return _isDolbyVisionOnly;
-  }
 
   int get _resumeTicks => widget.startTicks ?? (widget.item['UserData']?['PlaybackPositionTicks'] ?? 0) as int;
 
@@ -972,11 +965,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     // Original file or the server's version (see "Original file or the server's version").
     // Disc images and disc folders (ISO, Blu-ray, DVD) can't be streamed as one file.
     final item = widget.item;
-    final disc = (item['VideoType'] ?? 'VideoFile') != 'VideoFile' ||
-        ['iso', 'bluray', 'dvd'].contains((item['Container'] ?? '').toString().toLowerCase());
     final local = Downloads.instance.localFile(_id) != null; // downloaded: always the file here
-    final wantServer = !local &&
-        (disc || _mode == 'server' || (_mode == 'auto' && (_level >= _serverStep || _phoneNeedsServer)));
+    final wantServer = startWithServer(item: item, downloaded: local, mode: _mode, phone: _phone, level: _level);
+    if (wantServer && _phone && _isDolbyVisionOnly && _mode == 'auto') {
+      debugPrint('Player: Dolby Vision Profile 5 on a phone: using the server\'s version');
+    }
     if (wantServer) _presetServerTracks();
     // Resume where I stopped last time (Jellyfin counts time in ticks of 100 nanoseconds).
     final resume = _resumeTicks > 0 ? Duration(microseconds: _resumeTicks ~/ 10) : null;
