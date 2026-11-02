@@ -71,7 +71,7 @@ jobs:
 
       - name: Build the app without signing
         # The commit goes into the app, shown in the "Why isn't it playing?" box.
-        run: flutter build ios --release --no-codesign --dart-define=FRAME_BUILD=${GITHUB_SHA::7}
+        run: flutter build ios --release --no-codesign --dart-define=FRAME_BUILD=${GITHUB_SHA::7} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
 
       - name: Check the video libraries made it into the app (warning only)
         run: |

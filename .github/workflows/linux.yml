@@ -34,7 +34,8 @@ jobs:
         run: test -d linux || flutter create --platforms=linux --project-name player_test .
 
       - name: Build
-        run: flutter build linux --release
+        # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.
+        run: flutter build linux --release --dart-define=FRAME_BUILD=${GITHUB_SHA::7} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
 
       - name: Pack the AppImage
         run: |

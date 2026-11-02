@@ -35,7 +35,8 @@ jobs:
         run: Copy-Item packaging\app_icon.ico windows\runner\resources\app_icon.ico -Force
 
       - name: Build
-        run: flutter build windows --release
+        # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.
+        run: flutter build windows --release --dart-define=FRAME_BUILD=${{ github.sha }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
 
       # mpv plays the videos in its own window, like on Linux: real HDR, Dolby Vision and
       # TrueHD. The current Windows build of mpv goes next to Frame (Frame finds it there).
