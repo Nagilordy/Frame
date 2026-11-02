@@ -5,6 +5,12 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **Reliability checks.** Every upload to GitHub now runs a code check and 32 automated tests
+  (which version plays, remembered tracks, downloads, item text); a red ✗ means something would
+  break. The iPhone build runs them first and refuses to package an app missing its video player.
+- **Crash and problem reports** (Sentry), off until a SENTRY_DSN secret is added to the
+  repository. Sends crashes and playback failures with what the player was doing; never your
+  server's sign-in token, names or screenshots.
 - **iPhone: Home made for the phone (stage 1 of the phone design).** Home now has its own touch
   layout in phone sizes instead of the shrunk TV screen, upright and sideways.
   - Upright: artwork at the top with the title, Resume and Watch together, then Continue
