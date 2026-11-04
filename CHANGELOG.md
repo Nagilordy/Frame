@@ -5,6 +5,10 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **SteamOS Gaming Mode (Steam Machine, Steam Deck), first step.** Frame notices when it runs
+  inside Gaming Mode: it opens full screen, and the player always opens full screen, drawn so
+  Gaming Mode can show it in real HDR on an HDR TV. Desktop Mode and other systems are unchanged.
+  Not tested on a Steam device yet (see the SteamOS test issue).
 - **Reliability checks.** Every upload to GitHub now runs a code check and 32 automated tests
   (which version plays, remembered tracks, downloads, item text); a red ✗ means something would
   break. The iPhone build runs them first and refuses to package an app missing its video player.

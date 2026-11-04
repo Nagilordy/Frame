@@ -20,7 +20,8 @@ import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'syncplay.dart' show SyncPlay;
-import 'ui.dart' show isDesktop, toggleFullScreen, keyboardInset;
+import 'ui.dart' show isDesktop, toggleFullScreen, setFullScreen, keyboardInset;
+import 'gaming_mode.dart' show inGamingMode;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +29,8 @@ Future<void> main() async {
   if (isDesktop) {
     await windowManager.ensureInitialized();
     await windowManager.setTitle('Frame');
+    // SteamOS Gaming Mode: one app at a time, full screen (see gaming_mode.dart).
+    if (inGamingMode) await setFullScreen(true);
   }
   await Jellyfin.loadDeviceIdentity();
   // Looking for mpv runs alongside startup instead of before it (see findMpv).

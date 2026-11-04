@@ -22,6 +22,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'gaming_mode.dart';
 import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHint, PadButton, PadHints, GamepadInput;
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
@@ -302,11 +303,12 @@ class _Mpv {
     });
   }
 
-  Future<void> start(String mpv, List<String> args, {String? bridgeScript}) async {
+  Future<void> start(String mpv, List<String> args, {String? bridgeScript, Map<String, String> env = const {}}) async {
     if (Platform.isWindows && bridgeScript != null) return _startBridge(mpv, args, bridgeScript);
     final socketPath = '${Directory.systemTemp.path}/frame-mpv-$pid-${DateTime.now().millisecondsSinceEpoch}.sock';
     _socketPath = socketPath;
-    _process = await Process.start(mpv, [...args, '--input-ipc-server=$socketPath'], environment: _mpvEnv);
+    _process = await Process.start(mpv, [...args, '--input-ipc-server=$socketPath'],
+        environment: {..._mpvEnv, ...env});
     var exited = false;
     var connected = false; // (the socket is cleared again when mpv quits, so it can't tell)
     _process!.exitCode.then((code) {
@@ -973,7 +975,10 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     final fonts = await _fontsDir();
     final script = await _scriptPath();
     final bridge = Platform.isWindows ? await _scriptPath('frame_bridge.lua') : null;
-    final window = await _windowArgs();
+    // SteamOS Gaming Mode: always full screen, HDR through Gamescope (see gaming_mode.dart).
+    final gaming = inGamingMode ? gamingModePlayer(hdr: _mpvHasHdr) : null;
+    final window = gaming != null ? gaming.args : await _windowArgs();
+    if (gaming != null) _mpvFull = true;
     final resume = _resumeTicks > 0 ? _resumeTicks / 10000000 : 0.0;
     final args = <String>[
       ...window,
@@ -1034,7 +1039,7 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     ];
     if (!mounted) return; // closed while getting ready
     try {
-      await _mpv.start(_mpvPath!, args, bridgeScript: bridge);
+      await _mpv.start(_mpvPath!, args, bridgeScript: bridge, env: gaming?.env ?? const {});
     } catch (e) {
       if (mounted) setState(() => _error = "mpv couldn't start: ${errorText(e)}");
       return;
