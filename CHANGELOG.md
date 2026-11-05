@@ -5,6 +5,11 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **Windows: Frame's icon and name everywhere.** The program is now Frame.exe (not
+  player_test.exe), with Frame's name in Task Manager and the window from the first moment.
+  Desktop and Start menu shortcuts use Frame's icon file directly (so an old cached icon can't
+  show), and the video player window shows Frame's icon in the taskbar instead of mpv's.
+  Settings and sign-in are kept. Fixes #16.
 - **Show page: All seasons.** Shows with 7 or more seasons get an "All seasons" button at the end
   of the season row, and Triangle / Y opens it from anywhere on the page: every season in a grid
   (with what's unwatched), the current one selected, so Season 35 is a few presses away instead

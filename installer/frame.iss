@@ -25,7 +25,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName=Frame
 ; Frame's icon on the installer itself and in Windows' list of installed apps.
 SetupIconFile=..\packaging\app_icon.ico
-UninstallDisplayIcon={app}\player_test.exe
+UninstallDisplayIcon={app}\Frame.ico
 
 [Tasks]
 Name: "desktopicon"; Description: "Add a desktop icon"; GroupDescription: "Shortcuts:"
@@ -33,10 +33,18 @@ Name: "desktopicon"; Description: "Add a desktop icon"; GroupDescription: "Short
 [Files]
 ; Everything Flutter built: the app, its DLLs (including the video player) and its data.
 Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Frame's icon, for the shortcuts and the list of installed apps.
+Source: "..\packaging\app_icon.ico"; DestDir: "{app}"; DestName: "Frame.ico"; Flags: ignoreversion
+
+[InstallDelete]
+; Older versions installed the program as player_test.exe: remove it so only Frame.exe is left.
+Type: files; Name: "{app}\player_test.exe"
 
 [Icons]
-Name: "{autoprograms}\Frame"; Filename: "{app}\player_test.exe"
-Name: "{autodesktop}\Frame"; Filename: "{app}\player_test.exe"; Tasks: desktopicon
+; The shortcuts use Frame's icon file directly, so they show it even if Windows has an old
+; icon cached for the program.
+Name: "{autoprograms}\Frame"; Filename: "{app}\Frame.exe"; IconFilename: "{app}\Frame.ico"
+Name: "{autodesktop}\Frame"; Filename: "{app}\Frame.exe"; IconFilename: "{app}\Frame.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\player_test.exe"; Description: "Open Frame"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Frame.exe"; Description: "Open Frame"; Flags: nowait postinstall skipifsilent

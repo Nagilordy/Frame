@@ -34,6 +34,28 @@ jobs:
         shell: pwsh
         run: Copy-Item packaging\app_icon.ico windows\runner\resources\app_icon.ico -Force
 
+      # "Frame" everywhere Windows shows a name, instead of the project's internal name
+      # (player_test): the program is Frame.exe, and Task Manager, the taskbar, "Open with" and
+      # the window's first title all say Frame.
+      - name: Frame's name on Windows
+        shell: pwsh
+        run: |
+          $cmake = 'windows\CMakeLists.txt'
+          (Get-Content $cmake -Raw) -replace 'set\(BINARY_NAME "[^"]*"\)', 'set(BINARY_NAME "Frame")' | Set-Content $cmake -NoNewline
+          $rc = 'windows\runner\Runner.rc'
+          $t = Get-Content $rc -Raw
+          # CompanyName and ProductName stay as they were: Windows keeps Frame's settings, sign-in
+          # and downloads in a folder named after them, so changing them would lose everything.
+          $t = $t -replace '(VALUE "FileDescription", )"[^"]*"', '$1"Frame"'
+          $t = $t -replace '(VALUE "InternalName", )"[^"]*"', '$1"Frame"'
+          $t = $t -replace '(VALUE "OriginalFilename", )"[^"]*"', '$1"Frame.exe"'
+          Set-Content $rc $t -NoNewline
+          $main = 'windows\runner\main.cpp'
+          (Get-Content $main -Raw) -replace 'window\.Create\(L"[^"]*"', 'window.Create(L"Frame"' | Set-Content $main -NoNewline
+          Select-String -Path $cmake -Pattern 'BINARY_NAME'
+          Select-String -Path $rc -Pattern 'FileDescription|OriginalFilename'
+          Select-String -Path $main -Pattern 'window.Create'
+
       - name: Build
         # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.
         run: flutter build windows --release --dart-define=FRAME_BUILD=${{ github.sha }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
@@ -54,6 +76,21 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile mpv.7z
           7z x mpv.7z -obuild\windows\x64\runner\Release\mpv -y
           if (-not (Test-Path build\windows\x64\runner\Release\mpv\mpv.exe)) { throw "mpv.exe missing after unpacking" }
+
+      # While a video plays, the player (mpv) is its own window: give it Frame's icon and name,
+      # so the taskbar shows Frame's icon instead of mpv's.
+      - name: Frame's icon on the player
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo electron/rcedit --pattern 'rcedit-x64.exe' --dir .
+          .\rcedit-x64.exe build\windows\x64\runner\Release\mpv\mpv.exe `
+            --set-icon packaging\app_icon.ico `
+            --set-version-string FileDescription "Frame" `
+            --set-version-string ProductName "Frame"
+          if ($LASTEXITCODE -ne 0) { throw "rcedit failed" }
+          if (-not (Test-Path build\windows\x64\runner\Release\Frame.exe)) { throw "Frame.exe missing: the rename didn't apply" }
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
