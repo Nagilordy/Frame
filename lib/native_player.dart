@@ -303,6 +303,9 @@ class _Mpv {
     });
   }
 
+  /// The last few things mpv printed (shown if a video never starts).
+  final List<String> recent = [];
+
   Future<void> start(String mpv, List<String> args, {String? bridgeScript, Map<String, String> env = const {}}) async {
     if (Platform.isWindows && bridgeScript != null) return _startBridge(mpv, args, bridgeScript);
     final socketPath = '${Directory.systemTemp.path}/frame-mpv-$pid-${DateTime.now().millisecondsSinceEpoch}.sock';
@@ -323,6 +326,8 @@ class _Mpv {
         // Skip mpv's once-per-frame status line; keep everything else.
         if (line.trim().isEmpty || _statusLine.hasMatch(line)) return;
         debugPrint('mpv: $line');
+        recent.add(line.trim());
+        if (recent.length > 8) recent.removeAt(0);
       });
     }
     // mpv opens its control socket a moment after starting.
@@ -1085,6 +1090,18 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     });
     _lastSeek = DateTime.now();
     _adaptTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkSmoothness());
+    // Never stuck on the loading screen: if the file still hasn't opened after 40 seconds,
+    // close the player, bring Frame back, and say what mpv last printed.
+    Timer(const Duration(seconds: 40), () {
+      if (_loadedSeen || _ended || _error != null || !mounted) return;
+      _ended = true;
+      final said = _mpv.recent.isEmpty
+          ? 'mpv printed nothing.'
+          : _mpv.recent.reversed.take(4).toList().reversed.map((l) => l.length > 140 ? '${l.substring(0, 140)}…' : l).join('\n');
+      debugPrint('Player: the video did not start after 40 s');
+      setState(() => _error = "The video didn't start after 40 seconds.\nWhat the player said:\n$said");
+      unawaited(_mpv.close());
+    });
     // mpv closed (the video ended, or Back): report and go back. If it closed straight away
     // without playing anything, say so instead of silently going back.
     final started = DateTime.now();

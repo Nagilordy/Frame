@@ -5,7 +5,7 @@
 // - Frame opens full screen (there are no windows to move around), and steps aside (hides)
 //   while the player is open, because Gamescope only shows one window.
 // - The player (mpv) always opens full screen, drawn with Vulkan, so Gamescope can show it in
-//   real HDR on an HDR TV (ENABLE_HDR_WSI turns on Gamescope's HDR path for that program).
+//   real HDR on an HDR TV.
 // Desktop Mode, other Linux desktops, Windows and phones are unchanged.
 
 import 'dart:io' show Platform;
@@ -18,8 +18,8 @@ bool isGamingModeEnvironment(Map<String, String> env) {
   if (env['FRAME_GAMING_MODE'] == '1') return true;
   if (env['XDG_CURRENT_DESKTOP']?.toLowerCase() == 'gamescope') return true;
   if ((env['GAMESCOPE_WAYLAND_DISPLAY'] ?? '').isNotEmpty) return true;
-  // Started from Steam's TV interface (Big Picture / Gaming Mode).
-  if (env['SteamGamepadUI'] == '1') return true;
+  // (Not SteamGamepadUI: Steam also sets it for Big Picture on a normal desktop, where Frame
+  // must behave like any desktop app.)
   return false;
 }
 
@@ -32,7 +32,7 @@ final bool inGamingMode = Platform.isLinux && isGamingModeEnvironment(Platform.e
         '--fs',
         if (hdr) '--gpu-api=vulkan',
       ],
-      env: {
-        if (hdr) 'ENABLE_HDR_WSI': '1',
-      },
+      // Gamescope turns on its own HDR path for programs Steam starts; nothing to add here
+      // (ENABLE_HDR_WSI is for KDE's HDR layer and can break the player outside Gamescope).
+      env: const <String, String>{},
     );
