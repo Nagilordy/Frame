@@ -5,6 +5,10 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **Show page: All seasons.** Shows with 7 or more seasons get an "All seasons" button at the end
+  of the season row, and Triangle / Y opens it from anywhere on the page: every season in a grid
+  (with what's unwatched), the current one selected, so Season 35 is a few presses away instead
+  of 34. Works with the controller and the mouse. L2 / R2 still move one season at a time.
 - **Watch together notices, redesigned** (TV, PC and phone). In the player, a card at the top
   right shows who did what: their initial in their colour with a small badge (paused, play,
   jumped, joined, left), "Watch together · 3 watching", and a line in their colour that runs

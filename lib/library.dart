@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import 'main.dart' show Jellyfin;
 import 'syncplay.dart' show startWatchTogether, watchTogetherButton, playOrParty;
+import 'gamepad.dart' show PadHint, PadButton, PadHints, fullScreenHint;
 import 'images.dart';
 import 'movie.dart' show MovieScreen;
 import 'phone.dart';
@@ -1447,6 +1448,11 @@ class _ShowScreenState extends State<ShowScreen> {
       Navigator.of(context).maybePop();
       return KeyEventResult.handled;
     }
+    // Triangle / Y (or the Menu key): all seasons at once, to jump far (Season 35).
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.contextMenu && _seasons.length > 1) {
+      _openAllSeasons();
+      return KeyEventResult.handled;
+    }
     // L2 / R2 (Page Up / Page Down): previous or next season, with its tab selected.
     if (event is KeyDownEvent &&
         (event.logicalKey == LogicalKeyboardKey.pageUp || event.logicalKey == LogicalKeyboardKey.pageDown)) {
@@ -1482,7 +1488,15 @@ class _ShowScreenState extends State<ShowScreen> {
         : '${progressOf(next) > 0 ? 'Resume' : 'Play'} '
             'S${next['ParentIndexNumber'] ?? '?'} · E${next['IndexNumber'] ?? '?'}';
 
-    return Focus(
+    return PadHints(
+      hints: [
+        const PadHint(PadButton.select, 'Select'),
+        const PadHint(PadButton.back, 'Back'),
+        if (_seasons.length > 1) const PadHint(PadButton.tabs, 'Seasons'),
+        if (_seasons.length > 1) const PadHint(PadButton.menu, 'All seasons'),
+        if (isDesktop) fullScreenHint(),
+      ],
+      child: Focus(
       onKeyEvent: _onKey,
       child: Scaffold(
         backgroundColor: kBg,
@@ -1679,6 +1693,7 @@ class _ShowScreenState extends State<ShowScreen> {
           ]),
         ),
       ),
+    ),
     );
   }
 
@@ -1719,12 +1734,18 @@ class _ShowScreenState extends State<ShowScreen> {
     ]);
   }
 
+  // Shows with many seasons get an "All seasons" button at the end of the row (and Y opens it
+  // from anywhere on the page): every season in a grid, to jump straight to Season 35.
+  static const _manySeasons = 7;
+
   Widget _seasonTabs() {
     if (_seasons.length <= 1) return const SizedBox.shrink();
-    return FocusTraversalGroup(
+    final many = _seasons.length >= _manySeasons;
+    final tabs = FocusTraversalGroup(
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
-        clipBehavior: Clip.none,
+        // With the button pinned on the right, tabs scroll under a clean edge instead of under it.
+        clipBehavior: many ? Clip.hardEdge : Clip.none,
         child: Row(children: [
           for (var i = 0; i < _seasons.length; i++) ...[
             Focusable(
@@ -1747,6 +1768,46 @@ class _ShowScreenState extends State<ShowScreen> {
         ]),
       ),
     );
+    if (!many) return tabs;
+    return Row(children: [
+      Expanded(child: tabs),
+      const SizedBox(width: 16),
+      Focusable(
+        onSelect: _openAllSeasons,
+        onFocus: (_) => _showShowInfo(),
+        builder: (f) => tvPill('All seasons', focused: f, icon: Icons.grid_view_rounded, size: 23),
+      ),
+    ]);
+  }
+
+  Future<void> _openAllSeasons() async {
+    if (_seasons.length < 2) return;
+    final series = _details ?? widget.series;
+    final picked = await showGeneralDialog<int>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Close',
+      barrierColor: const Color(0xD906080B),
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (_, __, ___) => _AllSeasons(
+        seasons: _seasons,
+        current: _season,
+        show: series['Name']?.toString() ?? '',
+      ),
+      transitionBuilder: (_, a, __, child) => FadeTransition(
+        opacity: a,
+        child: ScaleTransition(
+          scale: Tween(begin: 0.96, end: 1.0).animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
+          child: child,
+        ),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    _setHero(false);
+    _pickSeason(picked);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && picked < _seasons.length) focusOn(_tabNodes[picked]);
+    });
   }
 
   Widget _episodeRow() {
@@ -2301,6 +2362,112 @@ class _ShowScreenState extends State<ShowScreen> {
         ),
         _phoneBack(pad.top + 12, m.left),
       ]),
+    );
+  }
+}
+
+
+// ---------- All seasons (show page) ----------
+
+// Every season of a show in a grid, opened with the "All seasons" button or Triangle / Y.
+// The current season is selected; Cross / A (or a click) opens a season, Circle / B closes.
+class _AllSeasons extends StatelessWidget {
+  const _AllSeasons({required this.seasons, required this.current, required this.show});
+  final List<dynamic> seasons;
+  final int current;
+  final String show;
+
+  String _status(dynamic season) {
+    final data = season['UserData'];
+    if (data is! Map) return '';
+    if (data['Played'] == true) return 'Watched';
+    final left = data['UnplayedItemCount'];
+    if (left is int && left > 0) return '$left unwatched';
+    return '';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PadHints(
+      hints: const [PadHint(PadButton.select, 'Open'), PadHint(PadButton.back, 'Close')],
+      child: Focus(
+        onKeyEvent: (_, event) {
+          if (event is KeyDownEvent &&
+              (event.logicalKey == LogicalKeyboardKey.escape ||
+                  event.logicalKey == LogicalKeyboardKey.backspace ||
+                  event.logicalKey == LogicalKeyboardKey.contextMenu)) {
+            Navigator.of(context).pop();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        },
+        child: TvCanvas(
+          child: Center(
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                width: 1480,
+                constraints: const BoxConstraints(maxHeight: 900),
+                padding: const EdgeInsets.fromLTRB(52, 44, 52, 44),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF12151B),
+                  borderRadius: BorderRadius.circular(36),
+                  border: Border.all(color: kFg.withOpacity(0.10)),
+                  boxShadow: const [BoxShadow(color: Color(0x8C000000), blurRadius: 60, offset: Offset(0, 24))],
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  Text(show, maxLines: 1, overflow: TextOverflow.ellipsis, style: tvBody(24, color: kSoft)),
+                  const SizedBox(height: 4),
+                  Text('All seasons', style: tvDisplay(48)),
+                  const SizedBox(height: 28),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      clipBehavior: Clip.none,
+                      child: FocusTraversalGroup(
+                        child: Wrap(spacing: 16, runSpacing: 16, children: [
+                          for (var i = 0; i < seasons.length; i++)
+                            Focusable(
+                              autofocus: i == current,
+                              scrollAlignment: 0.5,
+                              onSelect: () => Navigator.of(context).pop(i),
+                              builder: (f) {
+                                final on = i == current;
+                                final status = _status(seasons[i]);
+                                return AnimatedContainer(
+                                  duration: const Duration(milliseconds: 140),
+                                  width: 216,
+                                  height: 104,
+                                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                                  decoration: BoxDecoration(
+                                    color: f ? kFg : (on ? kFg.withOpacity(0.18) : kFg.withOpacity(0.07)),
+                                    borderRadius: BorderRadius.circular(22),
+                                  ),
+                                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                    Text(seasons[i]['Name']?.toString() ?? 'Season ${i + 1}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: tvBody(26,
+                                            weight: FontWeight.w700, color: f ? kBg : (on ? kFg : kSoft))),
+                                    if (status.isNotEmpty) ...[
+                                      const SizedBox(height: 4),
+                                      Text(status,
+                                          maxLines: 1,
+                                          style: tvBody(19, weight: FontWeight.w600, color: f ? kBg : kMuted)),
+                                    ],
+                                  ]),
+                                );
+                              },
+                            ),
+                        ]),
+                      ),
+                    ),
+                  ),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
