@@ -5,6 +5,12 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **Watch together notices, redesigned** (TV, PC and phone). In the player, a card at the top
+  right shows who did what: their initial in their colour with a small badge (paused, play,
+  jumped, joined, left), "Watch together · 3 watching", and a line in their colour that runs
+  down. When things happen quickly, the previous notice stays underneath as a small pill.
+  Problems (slow connection, can't open the video) are amber, a closed room is red, and
+  "Waiting for everyone" has its own card. Party notices on Home use the same look.
 - **SteamOS Gaming Mode (Steam Machine, Steam Deck), first step.** Frame notices when it runs
   inside Gaming Mode: it opens full screen, and the player always opens full screen, drawn so
   Gaming Mode can show it in real HDR on an HDR TV. Desktop Mode and other systems are unchanged.

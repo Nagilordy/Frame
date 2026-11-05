@@ -669,29 +669,127 @@ local function room_people(ass)
   text(ass, x - 6, cy, 6, BODY, 19, 600, SOFT, 'Watching together')
 end
 
--- Short notes ("Bob paused", "Alex joined"), shown even when the controls are hidden.
+-- ---------- Watch together notices ----------
+-- The same card as Frame's banners: top right, the person's initial in their colour with a
+-- small white badge for what they did (or an icon for problems), a small capitals line, one
+-- bold sentence, and a line along the bottom in their colour that runs down until it leaves.
+-- When notices come quickly, the previous one stays underneath as a smaller pill.
+-- Frame sends the sentence, its kind and who it's about (see party_notice.dart).
+
+local PARTY = { 'FA8C6F', '906EEE', 'AED14F', '5AB0F2', 'F584A8', 'EEC25F' }
+local AMBER, RED, CARD = '5AB0F2', '6B6BFF', '1B1512'
+local function party_colour(name) return PARTY[(#name % 6) + 1] end
+
+local function is_person(n) return n.who and n.who ~= '' and n.kind ~= 'warn' end
+local function notice_colour(n)
+  if is_person(n) then return party_colour(n.who) end
+  if n.kind == 'warn' or n.kind == 'waiting' then return AMBER end
+  if n.kind == 'closed' then return RED end
+  return accent_colour()
+end
+
+local function dot(ass, cx, cy, r, colour, alpha) rect(ass, cx - r, cy - r, cx + r, cy + r, r, colour, alpha) end
+
+-- A small icon for a kind, about s pixels across, centred on cx, cy.
+local function notice_icon(ass, kind, cx, cy, s, colour)
+  local k = s / 2
+  if kind == 'pause' then
+    rect(ass, cx - 0.6 * k, cy - 0.7 * k, cx - 0.16 * k, cy + 0.7 * k, 0, colour)
+    rect(ass, cx + 0.16 * k, cy - 0.7 * k, cx + 0.6 * k, cy + 0.7 * k, 0, colour)
+  elseif kind == 'play' then
+    path(ass, colour, { { cx - 0.5 * k, cy - 0.75 * k }, { cx + 0.75 * k, cy }, { cx - 0.5 * k, cy + 0.75 * k } })
+  elseif kind == 'seek' then
+    path(ass, colour, { { cx - 0.85 * k, cy - 0.6 * k }, { cx, cy }, { cx - 0.85 * k, cy + 0.6 * k } })
+    path(ass, colour, { { cx, cy - 0.6 * k }, { cx + 0.85 * k, cy }, { cx, cy + 0.6 * k } })
+  elseif kind == 'join' or kind == 'leave' then
+    rect(ass, cx - 0.7 * k, cy - 0.16 * k, cx + 0.7 * k, cy + 0.16 * k, 0, colour)
+    if kind == 'join' then rect(ass, cx - 0.16 * k, cy - 0.7 * k, cx + 0.16 * k, cy + 0.7 * k, 0, colour) end
+  elseif kind == 'waiting' then
+    path(ass, colour, { { cx - 0.6 * k, cy - 0.78 * k }, { cx + 0.6 * k, cy - 0.78 * k }, { cx, cy } })
+    path(ass, colour, { { cx, cy }, { cx + 0.6 * k, cy + 0.78 * k }, { cx - 0.6 * k, cy + 0.78 * k } })
+  elseif kind == 'warn' then
+    path(ass, colour, { { cx, cy - 0.85 * k }, { cx + 0.92 * k, cy + 0.72 * k }, { cx - 0.92 * k, cy + 0.72 * k } })
+    rect(ass, cx - 0.1 * k, cy - 0.32 * k, cx + 0.1 * k, cy + 0.24 * k, 0, CARD)
+    rect(ass, cx - 0.1 * k, cy + 0.36 * k, cx + 0.1 * k, cy + 0.54 * k, 0, CARD)
+  elseif kind == 'closed' then
+    local a, d = 0.62 * k, 0.15 * k
+    path(ass, colour, { { cx - a + d, cy - a - d }, { cx + a + d, cy + a - d }, { cx + a - d, cy + a + d }, { cx - a - d, cy - a + d } })
+    path(ass, colour, { { cx + a - d, cy - a - d }, { cx - a - d, cy + a - d }, { cx - a + d, cy + a + d }, { cx + a + d, cy - a + d } })
+  else -- info: two people
+    dot(ass, cx - 0.3 * k, cy - 0.32 * k, 0.28 * k, colour)
+    dot(ass, cx + 0.38 * k, cy - 0.26 * k, 0.24 * k, colour)
+    rect(ass, cx - 0.8 * k, cy + 0.08 * k, cx + 0.2 * k, cy + 0.8 * k, 0.3 * k, colour)
+    rect(ass, cx + 0.05 * k, cy + 0.12 * k, cx + 0.85 * k, cy + 0.72 * k, 0.26 * k, colour)
+  end
+end
+
+local function watching_line()
+  local g = state.info.group
+  local n = g and g.people and #g.people or 0
+  if n > 1 then return 'WATCH TOGETHER · ' .. n .. ' WATCHING' end
+  return 'WATCH TOGETHER'
+end
+
+-- The card. left: how much of its time is left (0..1), or nil while waiting (line stays full).
+-- Returns the bottom of the card.
+local function notice_card(ass, n, y, left)
+  local x1 = W - 120
+  local x0 = x1 - 600
+  local y1 = y + 136
+  local colour = notice_colour(n)
+  rect(ass, x0 - 1, y - 1, x1 + 1, y1 + 1, 29, FG, 'E6')     -- hairline edge
+  rect(ass, x0, y, x1, y1, 28, CARD, '08')
+  local cx, cy = x0 + 60, y + 58
+  if is_person(n) then
+    dot(ass, cx, cy, 32, colour)
+    text(ass, cx, cy + 1, 5, DISPLAY, 28, 700, BG, n.who:sub(1, 1):upper())
+    local bx, by = x0 + 82, y + 80
+    dot(ass, bx, by, 20, CARD)
+    dot(ass, bx, by, 16, FG)
+    notice_icon(ass, n.kind, bx, by, 18, BG)
+  else
+    dot(ass, cx, cy, 32, FG, 'E6')
+    notice_icon(ass, n.kind, cx, cy, 30, colour)
+  end
+  local msg = shorten(n.text, 44)
+  local size = utf8_len(msg) > 28 and 24 or 30
+  text(ass, x0 + 112, y + 44, 4, BODY, 18, 700, MUTED, watching_line())
+  text(ass, x0 + 112, y + 76, 4, BODY, size, 700, FG, msg)
+  rect(ass, x0 + 28, y + 110, x1 - 28, y + 114, 2, FG, 'E0')
+  local w = (x1 - x0 - 56) * (left or 1)
+  if w > 1 then rect(ass, x0 + 28, y + 110, x0 + 28 + w, y + 114, 2, colour, '00') end
+  return y1
+end
+
+-- The previous notice, small, under the card.
+local function notice_pill(ass, n, y)
+  local msg = shorten(n.text, 44)
+  local x1 = W - 120
+  local x0 = x1 - (10 + 42 + 14 + math.floor(utf8_len(msg) * 11.5) + 26)
+  local colour = notice_colour(n)
+  rect(ass, x0, y, x1, y + 60, 30, CARD, '40')
+  local cx, cy = x0 + 31, y + 30
+  if is_person(n) then
+    dot(ass, cx, cy, 21, colour, '33')
+    notice_icon(ass, n.kind, cx, cy, 20, BG)
+  else
+    dot(ass, cx, cy, 21, FG, 'DB')
+    notice_icon(ass, n.kind, cx, cy, 20, colour)
+  end
+  text(ass, x0 + 66, cy, 4, BODY, 22, 600, SOFT, msg, '33')
+end
+
 local function notice_and_waiting(ass)
   local now = mp.get_time()
+  local y = state.visible and 160 or 72
   local g = state.info.group
-  local msg, left = nil, 1
   if state.notice and now < (state.notice_until or 0) then
-    msg = state.notice
-    left = (state.notice_until - now) / 3.5
+    local n = { text = state.notice, kind = state.notice_kind or 'info', who = state.notice_who }
+    local bottom = notice_card(ass, n, y, (state.notice_until - now) / 3.5)
+    if state.prev and now < (state.prev_until or 0) then notice_pill(ass, state.prev, bottom + 12) end
   elseif g and g.state == 'Waiting' then
-    msg, left = 'Waiting for everyone…', nil
+    notice_card(ass, { text = 'Waiting for everyone…', kind = 'waiting' }, y, nil)
   end
-  if not msg then return end
-  -- A banner like the rest of Frame: solid bar, small caps line, bold text, and a line
-  -- along the bottom that runs down until it leaves (amber and full while waiting).
-  local half = math.max(240, 60 + #msg * 7)
-  local y = state.visible and 150 or 40
-  local x0, x1 = W / 2 - half, W / 2 + half
-  glass(ass, x0, y, x1, y + 84, 14)
-  text(ass, x0 + 26, y + 26, 4, BODY, 15, 700, MUTED, 'WATCH TOGETHER')
-  text(ass, x0 + 26, y + 54, 4, BODY, 23, 700, FG, msg)
-  rect(ass, x0 + 6, y + 80, x1 - 6, y + 84, 0, FG, 'EB')
-  local w = (x1 - x0 - 12) * (left or 1)
-  if w > 1 then rect(ass, x0 + 6, y + 80, x0 + 6 + w, y + 84, 0, left and accent_colour() or '3BA2F0', '00') end
 end
 
 -- ---------- Up next ----------
@@ -1155,8 +1253,17 @@ mp.observe_property('user-data/frame/pad', 'native', function(_, style)
   if type(style) == 'string' and style ~= '' then state.pad = style; frame_pad = style; render() end
 end)
 local notice_timer = nil
-mp.register_script_message('notice', function(text)
-  state.notice, state.notice_until = text, mp.get_time() + 3.5
+mp.register_script_message('notice', function(text, kind, who)
+  local now = mp.get_time()
+  -- The one still showing moves underneath as a small pill.
+  if state.notice and now < (state.notice_until or 0) then
+    state.prev = { text = state.notice, kind = state.notice_kind or 'info', who = state.notice_who }
+    state.prev_until = now + 3.5
+  else
+    state.prev = nil
+  end
+  state.notice, state.notice_until = text, now + 3.5
+  state.notice_kind, state.notice_who = kind or 'info', who
   render()
   -- redraw often while it shows, so its line runs down smoothly
   if notice_timer then notice_timer:kill() end

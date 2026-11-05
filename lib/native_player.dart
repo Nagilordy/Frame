@@ -23,6 +23,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'gaming_mode.dart';
+import 'party_notice.dart' show describeNotice;
 import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHint, PadButton, PadHints, GamepadInput;
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
@@ -1660,8 +1661,13 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     if (!_ended) _sendInfo();
   }
 
-  void _notice(String text) =>
-      _mpv.command(['script-message-to', 'frame_ui', 'notice', text]).then((_) {}, onError: (_) {});
+  // Watch together notices: the sentence, what kind it is and who it's about (party_notice.dart),
+  // so the player's controls can draw the person's initial with a badge.
+  void _notice(String text) {
+    final n = describeNotice(text);
+    _mpv.command(['script-message-to', 'frame_ui', 'notice', text, n.kind.name, n.who ?? '']).then((_) {},
+        onError: (_) {});
+  }
 
   Future<void> _togetherRequest(Map value) async {
     final link = _link;

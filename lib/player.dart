@@ -19,7 +19,7 @@ import 'ui.dart'
         phoneSidewaysOnly, kFg, kSoft, kPlaceholder, runtimeMinutes;
 import 'images.dart' show netImage;
 import 'main.dart' show Jellyfin;
-import 'banners.dart' show showBanner, bannerIcon;
+import 'banners.dart' show showPartyNotice;
 import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
 import 'perf.dart' show perfLog;
 import 'tracks.dart';
@@ -699,14 +699,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       setPaused: (paused) => paused ? player.pause() : player.play(),
       setSpeed: (speed) => player.setRate(speed),
       notice: (text) {
-        if (mounted) {
-          showBanner(context,
-              picture: bannerIcon(Icons.groups_rounded),
-              who: 'Watch together',
-              text: text,
-              line: kAccent,
-              duration: const Duration(milliseconds: 3500));
-        }
+        if (mounted) showPartyNotice(context, text, watching: widget.sync?.group.value?.people.length);
       },
       onStop: () {
         if (mounted) Navigator.of(context).maybePop();

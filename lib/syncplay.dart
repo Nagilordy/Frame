@@ -472,15 +472,26 @@ String _friendly(Object e) {
   return t;
 }
 
-void _toast(BuildContext context, String text, {bool problem = false}) => showBanner(
-      context,
-      picture: bannerIcon(problem ? Icons.error_outline_rounded : Icons.groups_rounded,
-          color: problem ? const Color(0xFFF0A23B) : kFg),
-      who: problem ? "Couldn't watch together" : 'Watch together',
-      text: text,
-      line: problem ? const Color(0xFFF0A23B) : kFg,
-      duration: Duration(seconds: problem ? 7 : 3),
-    );
+// Party notices on Home (started, joined, left, problems), in the same card as the player's:
+// a group icon in your colour, a warning in red for problems, and the "leave" icon when leaving.
+void _toast(BuildContext context, String text, {bool problem = false}) {
+  final leaving = text.startsWith('You left');
+  const red = Color(0xFFFF6B6B);
+  showBanner(
+    context,
+    picture: problem
+        ? Container(
+            alignment: Alignment.center,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: red.withOpacity(0.14)),
+            child: const Icon(Icons.warning_amber_rounded, size: 32, color: red),
+          )
+        : bannerIcon(leaving ? Icons.logout_rounded : Icons.groups_rounded, color: leaving ? kMuted : kAccent),
+    who: 'Watch together',
+    text: text,
+    line: problem ? red : (leaving ? kMuted : kAccent),
+    duration: Duration(seconds: problem ? 7 : 4),
+  );
+}
 
 /// Starts a watch party with nothing playing yet: whatever anyone in it plays next plays for
 /// everyone. Others see it on their Home (an invite, and the pill at the top right).

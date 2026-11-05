@@ -11,6 +11,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'party_notice.dart';
 import 'ui.dart';
 
 class _Current {
@@ -57,6 +58,8 @@ void showBanner(
   String? action, // e.g. 'JOIN'
   VoidCallback? onAction,
   Duration duration = const Duration(seconds: 6),
+  double top = 140, // 140: under your profile on Home; 72 inside the player
+  Widget? below, // a smaller note under the card (the previous Watch together notice)
 }) {
   final overlay = Overlay.maybeOf(context, rootOverlay: true);
   if (overlay == null) return;
@@ -86,6 +89,8 @@ void showBanner(
               onAction();
             },
       duration: duration,
+      top: top,
+      below: below,
       onGone: () {
         if (_current?.entry == entry) {
           _current = null;
@@ -111,7 +116,11 @@ class _BannerView extends StatefulWidget {
     required this.onAction,
     required this.duration,
     required this.onGone,
+    this.top = 140,
+    this.below,
   });
+  final double top;
+  final Widget? below;
   final Widget picture;
   final String who;
   final String text;
@@ -179,13 +188,22 @@ class _BannerViewState extends State<_BannerView> with TickerProviderStateMixin 
           // Top right, just under your profile, like the PS5's notifications.
           Positioned(
             right: 120,
-            top: 140,
+            top: widget.top,
             width: 600,
             child: AnimatedBuilder(
               animation: _in,
               builder: (_, child) => Opacity(
                 opacity: fade.value.clamp(0.0, 1.0),
-                child: Transform.translate(offset: Offset(80 * (1 - slide.value), 0), child: child),
+                child: Transform.translate(
+                  offset: Offset(80 * (1 - slide.value), 0),
+                  child: widget.below == null
+                      ? child
+                      : Column(crossAxisAlignment: CrossAxisAlignment.end, mainAxisSize: MainAxisSize.min, children: [
+                          child!,
+                          const SizedBox(height: 12),
+                          widget.below!,
+                        ]),
+                ),
               ),
               child: Material(
                 type: MaterialType.transparency,
@@ -312,4 +330,102 @@ class _Triangle extends CustomPainter {
 
   @override
   bool shouldRepaint(_Triangle old) => false;
+}
+
+
+// ---------- Watch together notices (party_notice.dart says what kind each one is) ----------
+
+const _amber = Color(0xFFF2B05A);
+const _red = Color(0xFFFF6B6B);
+
+IconData _badgeIcon(NoticeKind k) => switch (k) {
+      NoticeKind.pause => Icons.pause_rounded,
+      NoticeKind.play => Icons.play_arrow_rounded,
+      NoticeKind.seek => Icons.fast_forward_rounded,
+      NoticeKind.join => Icons.add_rounded,
+      NoticeKind.leave => Icons.remove_rounded,
+      NoticeKind.waiting => Icons.hourglass_top_rounded,
+      NoticeKind.warn => Icons.warning_amber_rounded,
+      NoticeKind.closed => Icons.close_rounded,
+      NoticeKind.info => Icons.groups_rounded,
+    };
+
+Color _noticeColor(PartyNotice n) {
+  if (n.aboutPerson && n.kind != NoticeKind.warn) return Color(partyColorOf(n.who!));
+  return switch (n.kind) {
+    NoticeKind.warn || NoticeKind.waiting => _amber,
+    NoticeKind.closed => _red,
+    _ => kAccent,
+  };
+}
+
+/// The person's initial in their colour, with a small white badge for what they did.
+Widget partyPicture(PartyNotice n) {
+  if (!n.aboutPerson || n.kind == NoticeKind.warn) {
+    return bannerIcon(_badgeIcon(n.kind), color: _noticeColor(n));
+  }
+  return Stack(clipBehavior: Clip.none, children: [
+    Positioned.fill(child: bannerInitial(n.who!, Color(partyColorOf(n.who!)), kBg)),
+    Positioned(
+      right: -6,
+      bottom: -6,
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: kFg,
+          border: Border.all(color: const Color(0xFF12151B), width: 4),
+        ),
+        child: Icon(_badgeIcon(n.kind), size: 18, color: kBg),
+      ),
+    ),
+  ]);
+}
+
+// The previous notice, shown small under the new one while both are recent.
+PartyNotice? _lastNotice;
+DateTime _lastNoticeAt = DateTime(0);
+
+/// A Watch together notice in the player: who did what, top right. [watching]: how many
+/// people are in the room, when known.
+void showPartyNotice(BuildContext context, String text, {int? watching, double top = 72}) {
+  final n = describeNotice(text);
+  final prev = _lastNotice;
+  final recent = prev != null && DateTime.now().difference(_lastNoticeAt) < const Duration(milliseconds: 3500);
+  _lastNotice = n;
+  _lastNoticeAt = DateTime.now();
+  Widget? below;
+  if (recent) {
+    final c = _noticeColor(prev);
+    final person = prev.aboutPerson && prev.kind != NoticeKind.warn;
+    below = Opacity(
+      opacity: 0.8,
+      child: Container(
+        height: 60,
+        padding: const EdgeInsets.fromLTRB(10, 0, 26, 0),
+        decoration: BoxDecoration(color: const Color(0xD112151B), borderRadius: BorderRadius.circular(30)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: person ? c : kFg.withOpacity(0.14)),
+            child: Icon(_badgeIcon(prev.kind), size: 22, color: person ? kBg : c),
+          ),
+          const SizedBox(width: 14),
+          Text(prev.text, style: tvBody(22, weight: FontWeight.w600, color: kSoft)),
+        ]),
+      ),
+    );
+  }
+  showBanner(
+    context,
+    picture: partyPicture(n),
+    who: watching != null && watching > 1 ? 'Watch together · $watching watching' : 'Watch together',
+    text: n.text,
+    line: _noticeColor(n),
+    duration: const Duration(milliseconds: 3500),
+    top: top,
+    below: below,
+  );
 }
