@@ -15,6 +15,10 @@ void main() {
     expect(isGamingModeEnvironment({'SteamDeck': '1'}), isFalse); // set in Desktop Mode too
     expect(isGamingModeEnvironment({}), isFalse);
   });
+  test('FRAME_GAMING_MODE overrides the detection', () {
+    expect(isGamingModeEnvironment({'XDG_CURRENT_DESKTOP': 'gamescope', 'FRAME_GAMING_MODE': '0'}), isFalse);
+    expect(isGamingModeEnvironment({'FRAME_GAMING_MODE': '1'}), isTrue);
+  });
   test('the player opens full screen, with HDR through Gamescope when mpv can', () {
     final hdr = gamingModePlayer(hdr: true);
     expect(hdr.args, ['--fs', '--gpu-api=vulkan']);

@@ -2,7 +2,8 @@
 //
 // In Gaming Mode, Steam runs every app inside Gamescope: one app at a time, full screen, with
 // Steam's own controller handling, overlay and HDR. Frame notices and adjusts:
-// - Frame opens full screen (there are no windows to move around).
+// - Frame opens full screen (there are no windows to move around), and steps aside (hides)
+//   while the player is open, because Gamescope only shows one window.
 // - The player (mpv) always opens full screen, drawn with Vulkan, so Gamescope can show it in
 //   real HDR on an HDR TV (ENABLE_HDR_WSI turns on Gamescope's HDR path for that program).
 // Desktop Mode, other Linux desktops, Windows and phones are unchanged.
@@ -12,6 +13,9 @@ import 'dart:io' show Platform;
 /// Whether these environment settings mean "running inside Gamescope" (Gaming Mode).
 /// Separate from [inGamingMode] so test/gaming_mode_test.dart can check every case.
 bool isGamingModeEnvironment(Map<String, String> env) {
+  // Override for testing or if detection is wrong: FRAME_GAMING_MODE=0 (off) or 1 (on).
+  if (env['FRAME_GAMING_MODE'] == '0') return false;
+  if (env['FRAME_GAMING_MODE'] == '1') return true;
   if (env['XDG_CURRENT_DESKTOP']?.toLowerCase() == 'gamescope') return true;
   if ((env['GAMESCOPE_WAYLAND_DISPLAY'] ?? '').isNotEmpty) return true;
   // Started from Steam's TV interface (Big Picture / Gaming Mode).

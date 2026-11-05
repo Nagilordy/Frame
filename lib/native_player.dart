@@ -1134,7 +1134,9 @@ class _NativePlayerScreenState extends State<NativePlayerScreen> {
     await Future.delayed(const Duration(milliseconds: 500));
     if (_ended || !mounted) return;
     PerfRecorder.hidden = true; // covered either way
-    if (fullScreen.value) {
+    // Gaming Mode shows only one window: Frame must step aside, or it stays on screen (on its
+    // loading screen) in front of the player.
+    if (fullScreen.value && !inGamingMode) {
       _underneath = true;
       return;
     }
