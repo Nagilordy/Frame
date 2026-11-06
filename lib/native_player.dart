@@ -244,9 +244,9 @@ Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlist
 Widget _playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
     // Preview (F9, Windows): Frame's own player drawing straight to the screen, with HDR.
     surfacePlayerFor(jf, item, inParty: sync != null, startTicks: startTicks) ??
-    useInAppPlayer(mpvFound: _mpvPath != null, gamingMode: inGamingMode, env: Platform.environment)
+    (useInAppPlayer(mpvFound: _mpvPath != null, gamingMode: inGamingMode, env: Platform.environment)
         ? PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
-        : NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
+        : NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks));
 
 // ---------- Talking to mpv ----------
 
