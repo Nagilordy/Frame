@@ -36,6 +36,8 @@ Window FrameXid() {
 // Same place and size as Frame's window contents, stacked just under Frame.
 void Place() {
   if (!g_surface || !g_window) return;
+  GdkDisplay* trap_display = gtk_widget_get_display(GTK_WIDGET(g_window));
+  gdk_x11_display_error_trap_push(trap_display);
   GdkWindow* gw = gtk_widget_get_window(GTK_WIDGET(g_window));
   if (!gw) return;
   int x = 0, y = 0;
@@ -57,6 +59,8 @@ void Place() {
     }
   }
   XFlush(g_display);
+  const gint error = gdk_x11_display_error_trap_pop(trap_display);
+  if (error) g_message("frame_video: placing the surface gave X error %d (ignored)", error);
 }
 
 gboolean OnFrameEvent(GtkWidget*, GdkEvent*, gpointer) {
@@ -74,13 +78,22 @@ void SetAtomList(Window w, const char* property, const char* const* values, int 
 Window Open(GtkWindow* window) {
   if (g_surface) return g_surface;
   GdkDisplay* gd = gtk_widget_get_display(GTK_WIDGET(window));
-  if (!GDK_IS_X11_DISPLAY(gd)) return 0;  // Wayland: no surface, the usual player is used
+  if (!GDK_IS_X11_DISPLAY(gd)) {
+    g_message("frame_video: not an X11 display, no surface");
+    return 0;  // Wayland: no surface, the usual player is used
+  }
+  g_message("frame_video: creating the surface");
+  gdk_x11_display_error_trap_push(gd);
   g_window = window;
   g_display = gdk_x11_display_get_xdisplay(gd);
   const int screen = DefaultScreen(g_display);
   g_surface = XCreateSimpleWindow(g_display, RootWindow(g_display, screen), 0, 0, 16, 16, 0,
                                   BlackPixel(g_display, screen), BlackPixel(g_display, screen));
-  if (!g_surface) return 0;
+  if (!g_surface) {
+    gdk_x11_display_error_trap_pop_ignored(gd);
+    g_message("frame_video: XCreateSimpleWindow failed");
+    return 0;
+  }
 
   XStoreName(g_display, g_surface, "Frame video");
   // Never takes focus.
@@ -103,6 +116,10 @@ Window Open(GtkWindow* window) {
   SetAtomList(g_surface, "_NET_WM_STATE", state, 2);
   const char* const type[] = {"_NET_WM_WINDOW_TYPE_UTILITY"};
   SetAtomList(g_surface, "_NET_WM_WINDOW_TYPE", type, 1);
+  XSync(g_display, False);
+  const gint error = gdk_x11_display_error_trap_pop(gd);
+  if (error) g_message("frame_video: setting up the surface gave X error %d", error);
+  g_message("frame_video: surface 0x%lx created, following Frame's window", g_surface);
 
   GtkWidget* w = GTK_WIDGET(window);
   g_handlers[0] = g_signal_connect(w, "configure-event", G_CALLBACK(OnFrameEvent), nullptr);
@@ -110,7 +127,7 @@ Window Open(GtkWindow* window) {
   g_handlers[2] = g_signal_connect(w, "focus-in-event", G_CALLBACK(OnFrameEvent), nullptr);
   g_handlers[3] = g_signal_connect(w, "map-event", G_CALLBACK(OnFrameEvent), nullptr);
   Place();
-  gtk_window_present(window);  // keep the keyboard and controller on Frame
+  g_message("frame_video: surface placed");
   return g_surface;
 }
 

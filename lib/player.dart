@@ -98,7 +98,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     configuration: PlayerConfiguration(
       bufferSize: _phone ? 64 * 1024 * 1024 : 256 * 1024 * 1024,
       // Phones: mpv's warnings too, for the "Why isn't it playing?" box below.
-      logLevel: _phone ? MPVLogLevel.warn : MPVLogLevel.error,
+      logLevel: _phone || _surface ? MPVLogLevel.warn : MPVLogLevel.error,
       // Windows and Linux (X11): mpv's best renderer, drawing into the video surface under
       // Frame's window (its "wid" is set before the video opens). See "Full quality" below.
       vo: _surface ? 'gpu-next' : null,
@@ -827,7 +827,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   // controller is created here (it's lazy) and playback starts once it's ready.
   Future<void> _startWhenVideoReady() async {
     if (_surface) {
+      // Step by step in the terminal, to find problems on new systems.
+      debugPrint('Player: asking for the video surface');
       final id = await FrameVideo.open();
+      debugPrint('Player: video surface ${id ?? 'not available'}');
+      // The engine's own warnings, in the terminal too.
+      _subs.add(player.stream.log.listen((l) => debugPrint('Player mpv: [${l.level}] ${l.prefix}: ${l.text.trim()}')));
       final mpv = player.platform;
       if (id != null && mpv is NativePlayer) {
         Future<void> set(String k, String v) async {
@@ -839,6 +844,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         }
 
         await set('wid', '$id');
+        debugPrint('Player: engine told to draw in the surface');
         if (Platform.isWindows) {
           await set('gpu-api', 'd3d11');
           await set('gpu-context', 'd3d11');
