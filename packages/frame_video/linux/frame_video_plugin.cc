@@ -151,7 +151,8 @@ void OnMethodCall(FlMethodChannel* channel, FlMethodCall* call, gpointer) {
   const gchar* method = fl_method_call_get_name(call);
   g_autoptr(FlMethodResponse) response = nullptr;
   if (strcmp(method, "open") == 0) {
-    FlView* view = fl_plugin_registrar_get_view(g_registrar);
+    g_message("frame_video: open asked");
+    FlView* view = g_registrar ? fl_plugin_registrar_get_view(g_registrar) : nullptr;
     GtkWidget* top = view ? gtk_widget_get_toplevel(GTK_WIDGET(view)) : nullptr;
     Window surface = (top && GTK_IS_WINDOW(top)) ? Open(GTK_WINDOW(top)) : 0;
     g_autoptr(FlValue) result = surface ? fl_value_new_int(static_cast<int64_t>(surface)) : fl_value_new_null();
@@ -168,7 +169,9 @@ void OnMethodCall(FlMethodChannel* channel, FlMethodCall* call, gpointer) {
 }  // namespace
 
 void frame_video_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
-  g_registrar = registrar;
+  // Keep our own reference: the app's plugin registration releases its reference right after
+  // this call, and the registrar is needed later (when a video opens) to find Frame's window.
+  g_registrar = FL_PLUGIN_REGISTRAR(g_object_ref(registrar));
   g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
   FlMethodChannel* channel = fl_method_channel_new(fl_plugin_registrar_get_messenger(registrar), "frame/video",
                                                    FL_METHOD_CODEC(codec));
