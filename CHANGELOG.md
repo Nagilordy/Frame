@@ -5,6 +5,11 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **Preview: Frame's own player with real HDR (Windows).** Press F9 to try it. The video engine
+  draws straight to the screen with mpv's best renderer (HDR, Dolby Vision, 4K, smooth motion),
+  under Frame's window, and Frame draws its own controls on top: one window, no separate mpv
+  program. Original files only for now (Watch together and the server's version use the usual
+  player). The info pill shows the renderer, decoder and whether the picture is HDR.
 - **SteamOS Gaming Mode: videos play inside Frame's window.** Gaming Mode shows one window at a
   time, so the separate player window could leave the video hidden or the controller in the
   wrong place. In Gaming Mode Frame now uses its in-app player. On Automatic, Dolby Vision 5 files

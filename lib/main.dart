@@ -12,15 +12,16 @@ import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
-import 'banners.dart' show bannerHandlesKey;
+import 'banners.dart' show bannerHandlesKey, showBanner, bannerIcon;
 import 'crash_reports.dart' show startWithCrashReports;
+import 'surface_player.dart' show loadNewPlayerPreview, toggleNewPlayerPreview, newPlayerPreview;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'syncplay.dart' show SyncPlay;
-import 'ui.dart' show isDesktop, toggleFullScreen, setFullScreen, keyboardInset;
+import 'ui.dart' show isDesktop, toggleFullScreen, setFullScreen, keyboardInset, kAccent;
 import 'gaming_mode.dart' show inGamingMode;
 
 Future<void> main() async {
@@ -33,6 +34,7 @@ Future<void> main() async {
     if (inGamingMode) await setFullScreen(true);
   }
   await Jellyfin.loadDeviceIdentity();
+  await loadNewPlayerPreview();
   // Looking for mpv runs alongside startup instead of before it (see findMpv).
   final mpvSearch = Stopwatch()..start();
   findMpv().then((_) => perfLog('looking for mpv took ${mpvSearch.elapsedMilliseconds} ms (in the background)'));
@@ -63,6 +65,21 @@ class _TestAppState extends State<TestApp> {
     }
     if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f11) {
       toggleFullScreen();
+      return true;
+    }
+    // F9 (Windows): turn the preview of Frame's own HDR player on or off (surface_player.dart).
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f9 && Platform.isWindows) {
+      toggleNewPlayerPreview().then((_) {
+        final ctx = _navigator.currentContext;
+        if (ctx != null && ctx.mounted) {
+          showBanner(ctx,
+              picture: bannerIcon(Icons.hdr_on_rounded),
+              who: 'Preview',
+              text: newPlayerPreview.value ? "Frame's new player is on" : "Frame's new player is off",
+              line: kAccent,
+              duration: const Duration(seconds: 3));
+        }
+      });
       return true;
     }
     return false;

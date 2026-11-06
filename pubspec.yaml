@@ -21,6 +21,9 @@ dependencies:
   background_downloader: ">=8.5.0 <10.0.0"
   # Crash and problem reports, only when a build is given a Sentry address (crash_reports.dart).
   sentry_flutter: ^9.6.0
+  # Frame's video surface (Windows): the video drawn under Frame's window, for HDR.
+  frame_video:
+    path: packages/frame_video
 
 dev_dependencies:
   flutter_test:

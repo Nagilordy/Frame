@@ -27,6 +27,7 @@ import 'party_notice.dart' show describeNotice;
 import 'gamepad.dart' show padActive, padStyle, PadStyle, PadHint, PadButton, PadHints, GamepadInput;
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
+import 'surface_player.dart' show surfacePlayerFor;
 import 'syncplay.dart' show SyncPlay, RoomLink;
 import 'images.dart' show netImage, LogoImage, logoNeedsMatte;
 import 'perf.dart' show perfLog, PerfRecorder;
@@ -241,6 +242,8 @@ Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlist
 
 // In SteamOS Gaming Mode videos play inside Frame's window (see gaming_mode.dart).
 Widget _playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
+    // Preview (F9, Windows): Frame's own player drawing straight to the screen, with HDR.
+    surfacePlayerFor(jf, item, inParty: sync != null, startTicks: startTicks) ??
     useInAppPlayer(mpvFound: _mpvPath != null, gamingMode: inGamingMode, env: Platform.environment)
         ? PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
         : NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
