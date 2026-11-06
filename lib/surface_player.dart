@@ -1,19 +1,23 @@
-// Frame's own player, drawing straight to the screen (preview, Windows).
+// Frame's own player, drawing straight to the screen (preview, Windows and Linux).
 //
 // The goal: everything the separate mpv window does (real HDR, Dolby Vision, 4K, smooth
 // motion), but inside Frame's window, with Frame's own controls, so the mpv program can go.
 //
 // How: the video engine (libmpv, the same one inside every Frame player) draws with its own
-// renderer (gpu-next, Direct3D 11, HDR) into a surface kept just under Frame's window
+// renderer (gpu-next; Direct3D 11 on Windows, Vulkan/OpenGL on Linux) into a surface kept just under Frame's window
 // (packages/frame_video). Frame's window turns see-through while the video plays, and this
 // screen draws only the controls, on top. One app, one window.
+//
+// Linux: the surface needs Frame running in X11 mode. Turning the preview on there also tells
+// the AppImage to start Frame in X11 mode next time (a small file, see packaging/AppRun), so it
+// works after a restart; SteamOS Gaming Mode is always X11.
 //
 // Preview: off by default; F9 turns it on or off (saved). Original file only, no Watch
 // together yet: those fall back to the usual player. The info line at the bottom shows what
 // the engine is doing (renderer, decoder, HDR or not) so tests can tell it works.
 
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -41,6 +45,42 @@ Future<void> toggleNewPlayerPreview() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('newPlayerPreview', newPlayerPreview.value);
   } catch (_) {}
+  if (Platform.isLinux) await _setX11Mode(newPlayerPreview.value);
+}
+
+/// Linux: whether Frame is running in X11 mode right now (needed for the surface).
+bool get runningInX11 {
+  final env = Platform.environment;
+  final backend = env['GDK_BACKEND'] ?? '';
+  if (backend.startsWith('x11')) return true;
+  if (backend.startsWith('wayland')) return false;
+  return (env['WAYLAND_DISPLAY'] ?? '').isEmpty && (env['DISPLAY'] ?? '').isNotEmpty;
+}
+
+/// The note the AppImage looks for to start Frame in X11 mode.
+File _x11ModeFile() {
+  final env = Platform.environment;
+  final config = env['XDG_CONFIG_HOME']?.isNotEmpty == true ? env['XDG_CONFIG_HOME']! : '${env['HOME']}/.config';
+  return File('$config/frame/x11-mode');
+}
+
+Future<void> _setX11Mode(bool on) async {
+  try {
+    final f = _x11ModeFile();
+    if (on) {
+      await f.parent.create(recursive: true);
+      await f.writeAsString('Start Frame in X11 mode (for the new player preview). Delete to go back.\n');
+    } else if (await f.exists()) {
+      await f.delete();
+    }
+  } catch (_) {}
+}
+
+/// What the F9 banner says.
+String newPlayerPreviewMessage() {
+  if (!newPlayerPreview.value) return "Frame's new player is off";
+  if (Platform.isLinux && !runningInX11) return "Frame's new player is on: restart Frame to use it";
+  return "Frame's new player is on";
 }
 
 /// Whether this video can use the preview player.
@@ -114,8 +154,10 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
 
     // Draw into the surface with mpv's best renderer, exactly like the mpv window.
     await set('wid', '$surface');
-    await set('gpu-api', 'd3d11');
-    await set('gpu-context', 'd3d11');
+    if (Platform.isWindows) {
+      await set('gpu-api', 'd3d11');
+      await set('gpu-context', 'd3d11');
+    }
     await set('hwdec', 'auto-safe');
     // HDR: tell Windows the video's real colours and brightness, so an HDR screen shows HDR.
     await set('target-colorspace-hint', 'yes');
@@ -454,6 +496,7 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
 
 /// Used by playerScreen: the preview player for this video, when it applies.
 Widget? surfacePlayerFor(Jellyfin jf, dynamic item, {required bool inParty, int? startTicks}) {
-  if (!Platform.isWindows || !canUseSurfacePlayer(inParty: inParty)) return null;
+  if (!canUseSurfacePlayer(inParty: inParty)) return null;
+  if (Platform.isLinux && !runningInX11) return null; // needs X11 mode (after a restart)
   return SurfacePlayerScreen(jf: jf, item: item, startTicks: startTicks);
 }

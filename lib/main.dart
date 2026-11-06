@@ -14,7 +14,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'banners.dart' show bannerHandlesKey, showBanner, bannerIcon;
 import 'crash_reports.dart' show startWithCrashReports;
-import 'surface_player.dart' show loadNewPlayerPreview, toggleNewPlayerPreview, newPlayerPreview;
+import 'surface_player.dart' show loadNewPlayerPreview, toggleNewPlayerPreview, newPlayerPreviewMessage;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
@@ -67,15 +67,15 @@ class _TestAppState extends State<TestApp> {
       toggleFullScreen();
       return true;
     }
-    // F9 (Windows): turn the preview of Frame's own HDR player on or off (surface_player.dart).
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f9 && Platform.isWindows) {
+    // F9 (Windows, Linux): turn the preview of Frame's own HDR player on or off (surface_player.dart).
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f9 && isDesktop) {
       toggleNewPlayerPreview().then((_) {
         final ctx = _navigator.currentContext;
         if (ctx != null && ctx.mounted) {
           showBanner(ctx,
               picture: bannerIcon(Icons.hdr_on_rounded),
               who: 'Preview',
-              text: newPlayerPreview.value ? "Frame's new player is on" : "Frame's new player is off",
+              text: newPlayerPreviewMessage(),
               line: kAccent,
               duration: const Duration(seconds: 3));
         }

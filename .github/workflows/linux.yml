@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev \
             libstdc++-12-dev libmpv-dev mpv file desktop-file-utils \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev libx11-dev
 
       - uses: subosito/flutter-action@v2
         with:
@@ -33,6 +33,49 @@ jobs:
 
       - name: Linux project files
         run: test -d linux || flutter create --platforms=linux --project-name player_test .
+
+      # Frame's window can be see-through where Frame draws nothing, so the new player's video
+      # (drawn under the window, packages/frame_video) shows through behind the controls:
+      # an RGBA window and a clear Flutter background. Every screen paints its own background,
+      # so nothing else changes.
+      - name: See-through window (for the new player)
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'linux/runner/my_application.cc'
+          s = open(p).read()
+          if 'gdk_screen_get_rgba_visual' not in s:
+              m = re.search(r'GtkWindow\* window =[^;]*;\n', s)
+              if m:
+                  add = ('  {\n'
+                         '    GdkScreen* screen = gtk_window_get_screen(window);\n'
+                         '    GdkVisual* visual = gdk_screen_get_rgba_visual(screen);\n'
+                         '    if (visual != nullptr && gdk_screen_is_composited(screen)) {\n'
+                         '      gtk_widget_set_visual(GTK_WIDGET(window), visual);\n'
+                         '      gtk_widget_set_app_paintable(GTK_WIDGET(window), TRUE);\n'
+                         '    }\n'
+                         '  }\n')
+                  s = s[:m.end()] + add + s[m.end():]
+                  print('RGBA window: added')
+              else:
+                  print('::warning::RGBA window: window creation line not found')
+          if 'fl_view_set_background_color' in s:
+              s = re.sub(r'gdk_rgba_parse\(&background_color, "#[0-9A-Fa-f]+"\)',
+                         'gdk_rgba_parse(&background_color, "#00000000")', s)
+              print('Clear background: set')
+          else:
+              m = re.search(r'FlView\* view = fl_view_new\(project\);\n', s)
+              if m:
+                  add = ('  GdkRGBA frame_clear;\n'
+                         '  gdk_rgba_parse(&frame_clear, "#00000000");\n'
+                         '  fl_view_set_background_color(view, &frame_clear);\n')
+                  s = s[:m.end()] + add + s[m.end():]
+                  print('Clear background: added')
+              else:
+                  print('::warning::Clear background: view creation line not found')
+          open(p, 'w').write(s)
+          PY
+          grep -n "rgba\|background_color\|frame_clear" linux/runner/my_application.cc || true
 
       - name: Build
         # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.

@@ -5,7 +5,8 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
-- **Preview: Frame's own player with real HDR (Windows).** Press F9 to try it. The video engine
+- **Preview: Frame's own player with real HDR (Windows and Linux).** Press F9 to try it (on
+  Linux, then restart Frame: it needs X11 mode, which the AppImage switches to by itself). The video engine
   draws straight to the screen with mpv's best renderer (HDR, Dolby Vision, 4K, smooth motion),
   under Frame's window, and Frame draws its own controls on top: one window, no separate mpv
   program. Original files only for now (Watch together and the server's version use the usual

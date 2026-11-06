@@ -1,5 +1,5 @@
 name: frame_video
-description: Frame's video surface. On Windows, a window just under Frame's own, where the video engine draws (with HDR), so Frame's interface can sit on top in one window.
+description: Frame's video surface. On Windows and Linux (X11), a window just under Frame's own, where the video engine draws (with HDR), so Frame's interface can sit on top in one window.
 version: 0.0.1
 publish_to: none
 
@@ -16,3 +16,5 @@ flutter:
     platforms:
       windows:
         pluginClass: FrameVideoPluginCApi
+      linux:
+        pluginClass: FrameVideoPlugin
