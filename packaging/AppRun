@@ -2,10 +2,4 @@
 # Starts Frame from inside the AppImage, with its bundled libraries first in line.
 HERE="$(dirname "$(readlink -f "$0")")"
 export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
-# Frame's player draws its video in a window under Frame's, which needs X11 mode (Wayland can't
-# do that yet), so Frame always starts in X11 mode, even if the desktop asked for Wayland.
-# FRAME_OLD_PLAYER=1 (the old mpv window, emergency only) leaves the desktop's choice alone.
-if [ "$FRAME_OLD_PLAYER" != "1" ]; then
-  export GDK_BACKEND=x11
-fi
 exec "$HERE/usr/bin/player_test" "$@"
