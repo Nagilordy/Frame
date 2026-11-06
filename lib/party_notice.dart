@@ -40,10 +40,6 @@ PartyNotice describeNotice(String text) {
   return PartyNotice(t, NoticeKind.info);
 }
 
-/// Each person's colour, the same on every device and in the mpv player (frame_ui.lua picks
-/// it the same way: by the name's length in bytes).
+/// Each person's colour, the same on every device (picked by the name's length in bytes).
 const partyColors = [0xFF6F8CFA, 0xFFEE6E90, 0xFF4FD1AE, 0xFFF2B05A, 0xFFA884F5, 0xFF5FC2EE];
 int partyColorOf(String name) => partyColors[utf8.encode(name).length % partyColors.length];
-
-/// The name of a kind, as sent to the mpv player's controls.
-String noticeKindName(NoticeKind k) => k.name;

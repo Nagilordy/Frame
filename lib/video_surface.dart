@@ -10,10 +10,6 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 
-/// FRAME_OLD_PLAYER=1, set before starting Frame, brings back the old separate mpv window: an
-/// emergency way out while the new player is young, not an option in the app.
-final bool oldPlayerRequested = (Platform.environment['FRAME_OLD_PLAYER'] ?? '') == '1';
-
 /// Linux: whether Frame is running in X11 mode right now (the surface needs it).
 bool get runningInX11 {
   final env = Platform.environment;

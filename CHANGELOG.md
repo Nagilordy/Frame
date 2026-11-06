@@ -8,8 +8,8 @@ What changed in each version of Frame. Newest first.
 - **One player: Frame's own** (Windows and Linux). Every video, including Watch together and
   the server's version, plays in Frame's player, drawn inside Frame's window; no separate mpv
   window. HDR films are shown converted to a normal picture for now: real HDR comes later.
-  Frame runs in Linux's normal display mode again. FRAME_OLD_PLAYER=1 brings back the old mpv
-  window in an emergency.
+  Frame runs in Linux's normal display mode again. The old mpv window player is gone
+  completely (no emergency switch), and the Windows download no longer includes mpv.exe.
 - **SteamOS Gaming Mode: videos play inside Frame's window.** Gaming Mode shows one window at a
   time, so the separate player window could leave the video hidden or the controller in the
   wrong place. In Gaming Mode Frame now uses its in-app player. On Automatic, Dolby Vision 5 files
@@ -18,7 +18,7 @@ What changed in each version of Frame. Newest first.
 - **Windows: Frame's icon and name everywhere.** The program is now Frame.exe (not
   player_test.exe), with Frame's name in Task Manager and the window from the first moment.
   Desktop and Start menu shortcuts use Frame's icon file directly (so an old cached icon can't
-  show), and the video player window shows Frame's icon in the taskbar instead of mpv's.
+  show).
   Settings and sign-in are kept. Fixes #16.
 - **Show page: All seasons.** Shows with 7 or more seasons get an "All seasons" button at the end
   of the season row, and Triangle / Y opens it from anywhere on the page: every season in a grid

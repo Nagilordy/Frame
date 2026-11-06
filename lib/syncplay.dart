@@ -4,7 +4,7 @@
 // How it works: rooms ("groups") live on the Jellyfin server. Everyone asks the server to
 // play, pause or seek; the server tells everyone what to do and exactly when (in server time),
 // so the pictures stay together. Frame keeps a clock offset to the server (like NTP) to act at
-// the right moment, and gently nudges its speed to stay in step (see native_player.dart).
+// the right moment, and gently nudges its speed to stay in step (see player.dart).
 //
 // Frame adds what Jellyfin's version lacks: a Watch together button next to Play, rooms you
 // can see and join from Home, who's in the room on screen, and notes like "Bob paused".
@@ -18,8 +18,8 @@ import 'package:flutter/services.dart';
 
 import 'banners.dart';
 import 'gamepad.dart' show PadHint, PadButton, PadHints;
+import 'player.dart' show playerScreen;
 import 'main.dart' show Jellyfin;
-import 'native_player.dart' show playerScreen;
 import 'perf.dart' show AppLog;
 import 'ui.dart';
 
@@ -1311,10 +1311,8 @@ void showInvite(BuildContext context, Jellyfin jf, dynamic room) {
 
 // ---------- Following a room, for any player ----------
 //
-// The same rules as the mpv window player (native_player.dart), for Frame's built-in player
-// (used on Windows, and wherever the mpv window isn't available): your play, pause and seek
-// go to the room; the room's commands are carried out at the exact moment on the server's
-// clock; small drift is closed by playing up to 5% faster or slower.
+// The rules for Frame's player: your play, pause and seek go to the room; the room's
+// commands are carried out at the exact moment on the server's clock; small drift is closed by playing up to 5% faster or slower.
 
 typedef RoomVideo = ({String itemId, String playlistItemId, int startTicks, bool playing});
 

@@ -20,14 +20,7 @@ final ValueNotifier<bool> fullScreen = ValueNotifier(false);
 // Full screen is a choice, never automatic (this is a PC app): F11 anywhere, the controller's
 // touchpad / Create button (shown in the controller legend), the button in the player, or
 // double-clicking the video.
-Future<void> toggleFullScreen() {
-  final override = fullScreenOverride;
-  if (override != null) return override();
-  return setFullScreen(!fullScreen.value);
-}
-
-// While a video plays in the mpv window, full screen applies to that window instead.
-Future<void> Function()? fullScreenOverride;
+Future<void> toggleFullScreen() => setFullScreen(!fullScreen.value);
 
 Future<void> setFullScreen(bool on) async {
   if (!isDesktop) return;

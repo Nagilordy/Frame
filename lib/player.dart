@@ -78,6 +78,12 @@ String _qualityLine(dynamic item) {
 
 // ---------- The screen ----------
 
+/// The screen that plays a video. Every video plays in Frame's own player.
+/// With [sync], the video plays in a Watch together room: play, pause and seek go through the
+/// room, so everyone stays together.
+Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
+    PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
+
 class PlayerScreen extends StatefulWidget {
   const PlayerScreen({super.key, required this.jf, required this.item, this.sync, this.playlistItemId, this.startTicks});
   final Jellyfin jf;
@@ -1034,7 +1040,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       await mpv.setProperty('demuxer-max-back-bytes', _phone ? '32MiB' : '128MiB');
       await mpv.setProperty('demuxer-readahead-secs', '60');
       // Wi-Fi drops or a NAS waking up: reconnect and carry on instead of stopping the video
-      // (same as the PC's mpv window).
+      // (reconnects on Wi-Fi drops).
       // (Each in its own try: an older libmpv that doesn't know a value mustn't stop the rest.)
       try {
         await mpv.setProperty('stream-lavf-o', 'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4');
@@ -1046,7 +1052,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           await mpv.setProperty('deinterlace', 'auto');
         } catch (_) {}
       }
-      // Seeks: exact on the PC (the timeline lands where you point, like the mpv window);
+      // Seeks: exact on the PC (the timeline lands where you point, exact);
       // nearest keyframe on phones, which is much faster on a small CPU.
       await mpv.setProperty('hr-seek', _phone ? 'no' : 'absolute');
       // mpv draws subtitles straight onto the video. This handles every kind, including
@@ -1065,7 +1071,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     final item = widget.item;
     final local = Downloads.instance.localFile(_id) != null; // downloaded: always the file here
     // Phones, and Gaming Mode on SteamOS, can't fix Dolby Vision 5's colours in this player the
-    // way the PC's mpv window does: on Automatic they use the server's version for those files.
+    // usual way: on Automatic they use the server's version for those files.
     final wantServer =
         startWithServer(
             item: item, downloaded: local, mode: _mode, phone: (_phone || inGamingMode) && !_surface, level: _level);

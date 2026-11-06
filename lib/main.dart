@@ -17,7 +17,6 @@ import 'crash_reports.dart' show startWithCrashReports;
 import 'video_surface.dart' show surfacePlayerSkipped;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
-import 'native_player.dart' show findMpv;
 import 'perf.dart';
 import 'profiles.dart' show StartScreen;
 import 'syncplay.dart' show SyncPlay;
@@ -34,9 +33,6 @@ Future<void> main() async {
     if (inGamingMode) await setFullScreen(true);
   }
   await Jellyfin.loadDeviceIdentity();
-  // Looking for mpv runs alongside startup instead of before it (see findMpv).
-  final mpvSearch = Stopwatch()..start();
-  findMpv().then((_) => perfLog('looking for mpv took ${mpvSearch.elapsedMilliseconds} ms (in the background)'));
   tidyArtworkCache();
   // Keep more artwork in memory so going back to a card shows it instantly.
   PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;

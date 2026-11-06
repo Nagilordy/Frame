@@ -60,36 +60,9 @@ jobs:
         # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.
         run: flutter build windows --release --dart-define=FRAME_BUILD=${{ github.sha }} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
 
-      # mpv plays the videos in its own window, like on Linux: real HDR, Dolby Vision and
-      # TrueHD. The current Windows build of mpv goes next to Frame (Frame finds it there).
-      - name: Add mpv
+      - name: Check the program name
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $release = gh api repos/shinchiro/mpv-winbuild-cmake/releases/latest | ConvertFrom-Json
-          # The plain 64-bit player (not the -v3 build for newer CPUs only, not the -dev files).
-          $asset = $release.assets | Where-Object { $_.name -match '^mpv-x86_64-\d{8}-git-.*\.7z$' } | Select-Object -First 1
-          if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -match '^mpv-x86_64-.*\.7z$' -and $_.name -notmatch 'v3' } | Select-Object -First 1 }
-          if (-not $asset) { throw "No mpv build found in $($release.tag_name): $($release.assets.name -join ', ')" }
-          Write-Host "mpv: $($asset.name)"
-          Invoke-WebRequest $asset.browser_download_url -OutFile mpv.7z
-          7z x mpv.7z -obuild\windows\x64\runner\Release\mpv -y
-          if (-not (Test-Path build\windows\x64\runner\Release\mpv\mpv.exe)) { throw "mpv.exe missing after unpacking" }
-
-      # While a video plays, the player (mpv) is its own window: give it Frame's icon and name,
-      # so the taskbar shows Frame's icon instead of mpv's.
-      - name: Frame's icon on the player
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download --repo electron/rcedit --pattern 'rcedit-x64.exe' --dir .
-          .\rcedit-x64.exe build\windows\x64\runner\Release\mpv\mpv.exe `
-            --set-icon packaging\app_icon.ico `
-            --set-version-string FileDescription "Frame" `
-            --set-version-string ProductName "Frame"
-          if ($LASTEXITCODE -ne 0) { throw "rcedit failed" }
           if (-not (Test-Path build\windows\x64\runner\Release\Frame.exe)) { throw "Frame.exe missing: the rename didn't apply" }
 
       - name: Install Inno Setup

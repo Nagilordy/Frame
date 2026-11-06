@@ -372,15 +372,10 @@ class GamepadInput {
 
   // Hands the key to the selected widget, then to each widget around it, exactly the way
   // Flutter delivers a real key press, stopping at the first one that uses it.
-  /// While a video plays in the mpv window, its screen takes the controller's buttons
-  /// directly (Frame's own window isn't in front, so it may not have keyboard focus).
-  static bool Function(LogicalKeyboardKey key)? keyOverride;
 
   static void _send(LogicalKeyboardKey key, {bool repeat = false}) {
     // A notification banner with an action (Triangle) comes first, whatever is selected.
     if (!repeat && bannerHandlesKey(key)) return;
-    final override = keyOverride;
-    if (override != null && override(key)) return;
     final physical = _physical[key]!;
     final time = Duration(milliseconds: DateTime.now().millisecondsSinceEpoch);
     final KeyEvent event = repeat
