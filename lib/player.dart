@@ -98,7 +98,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     configuration: PlayerConfiguration(
       bufferSize: _phone ? 64 * 1024 * 1024 : 256 * 1024 * 1024,
       // Phones: mpv's warnings too, for the "Why isn't it playing?" box below.
-      logLevel: _phone || _surface ? MPVLogLevel.warn : MPVLogLevel.error,
+      // (Through the video surface: the engine's info messages too, such as which video and
+      // sound outputs it opened, to find problems on new systems.)
+      logLevel: _surface ? MPVLogLevel.info : (_phone ? MPVLogLevel.warn : MPVLogLevel.error),
       // Windows and Linux (X11): mpv's best renderer, drawing into the video surface under
       // Frame's window (its "wid" is set before the video opens). See "Full quality" below.
       vo: _surface ? 'gpu-next' : null,
@@ -857,6 +859,23 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         await set('tscale', 'oversample');
         await set('background-color', '#000000');
         _note('drawing through the video surface (gpu-next)');
+        // A few seconds in: what the engine is drawing with, and how big (for the terminal).
+        Timer(const Duration(seconds: 6), () async {
+          if (!mounted) return;
+          Future<String> p(String k) async {
+            try {
+              return await mpv.getProperty(k);
+            } catch (_) {
+              return '?';
+            }
+          }
+
+          debugPrint('Player: after 6 s: vo=${await p('current-vo')} '
+              'video=${await p('video-params/w')}x${await p('video-params/h')} '
+              'window=${await p('osd-width')}x${await p('osd-height')} '
+              'hwdec=${await p('hwdec-current')} ao=${await p('current-ao')} '
+              'paused=${await p('pause')} time=${await p('time-pos')}');
+        });
         if (mounted) _start();
         return;
       }
