@@ -26,6 +26,8 @@ import 'tracks.dart';
 import 'phone.dart';
 import 'playback_rules.dart';
 import 'gaming_mode.dart' show inGamingMode;
+import 'package:frame_video/frame_video.dart';
+import 'video_surface.dart' show surfaceWanted, surfacePlayerSkipped;
 import 'crash_reports.dart' show reportProblem;
 import 'downloads.dart' show Downloads;
 
@@ -97,9 +99,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       bufferSize: _phone ? 64 * 1024 * 1024 : 256 * 1024 * 1024,
       // Phones: mpv's warnings too, for the "Why isn't it playing?" box below.
       logLevel: _phone ? MPVLogLevel.warn : MPVLogLevel.error,
+      // Windows and Linux (X11): mpv's best renderer, drawing into the video surface under
+      // Frame's window (its "wid" is set before the video opens). See "Full quality" below.
+      vo: _surface ? 'gpu-next' : null,
+      libass: _surface,
     ),
   );
   static final bool _phone = Platform.isIOS || Platform.isAndroid;
+
+  // ---------- Full quality: the video surface (Windows, Linux X11) ----------
+  //
+  // Instead of handing each frame to Flutter as a normal picture (no HDR), the engine draws
+  // with mpv's best renderer (gpu-next: real HDR, Dolby Vision, smooth motion, 4K) into a
+  // window kept just under Frame's (packages/frame_video), and this screen is see-through, so
+  // the controls sit on top of the picture: one app, one window. If the surface can't be made,
+  // the player falls back to drawing inside Frame's window (normal picture).
+  bool _surface = !_phone && surfaceWanted;
   // Which commit this app was built from (set by the iPhone build workflow), to tell builds apart.
   static const String _build = String.fromEnvironment('FRAME_BUILD', defaultValue: 'dev');
   final List<String> _phoneLog = []; // the last few things mpv said (phones only)
@@ -300,7 +315,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         // The server already fixed the colours: no conversion on this device.
         await mpv.setProperty('vf', '');
         await mpv.setProperty('hwdec', 'auto-safe');
-      } else if (_isDolbyVisionOnly) {
+      } else if (_isDolbyVisionOnly && !_surface) {
+        // (Through the video surface, gpu-next applies Dolby Vision's colours itself.)
         await _applyDvFilter();
       }
       if (at != null) await mpv.setProperty('start', (at.inMilliseconds / 1000).toStringAsFixed(1));
@@ -810,6 +826,44 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   // draw ("No render context set": sound and time run, but no picture, on iPhone). The
   // controller is created here (it's lazy) and playback starts once it's ready.
   Future<void> _startWhenVideoReady() async {
+    if (_surface) {
+      final id = await FrameVideo.open();
+      final mpv = player.platform;
+      if (id != null && mpv is NativePlayer) {
+        Future<void> set(String k, String v) async {
+          try {
+            await mpv.setProperty(k, v);
+          } catch (e) {
+            debugPrint('Player: $k=$v not accepted ($e)');
+          }
+        }
+
+        await set('wid', '$id');
+        if (Platform.isWindows) {
+          await set('gpu-api', 'd3d11');
+          await set('gpu-context', 'd3d11');
+        }
+        // HDR: tell the screen the video's real colours and brightness.
+        await set('target-colorspace-hint', 'yes');
+        // Smooth motion: frames timed to the screen, with light blending between them.
+        await set('video-sync', 'display-resample');
+        await set('interpolation', 'yes');
+        await set('tscale', 'oversample');
+        await set('background-color', '#000000');
+        _note('drawing through the video surface (gpu-next)');
+        if (mounted) _start();
+        return;
+      }
+      // No surface: draw inside Frame's window instead (normal picture).
+      _note('no video surface; drawing inside the window');
+      surfacePlayerSkipped.value = "full-quality video couldn't start on this system, so HDR is off";
+      if (mounted) setState(() => _surface = false);
+      if (mpv is NativePlayer) {
+        try {
+          await mpv.setProperty('vo', 'libmpv');
+        } catch (_) {}
+      }
+    }
     final watch = Stopwatch()..start();
     try {
       await controller.platform.future.timeout(const Duration(seconds: 10));
@@ -988,7 +1042,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     // Phones, and Gaming Mode on SteamOS, can't fix Dolby Vision 5's colours in this player the
     // way the PC's mpv window does: on Automatic they use the server's version for those files.
     final wantServer =
-        startWithServer(item: item, downloaded: local, mode: _mode, phone: _phone || inGamingMode, level: _level);
+        startWithServer(
+            item: item, downloaded: local, mode: _mode, phone: (_phone || inGamingMode) && !_surface, level: _level);
     if (wantServer && _phone && _isDolbyVisionOnly && _mode == 'auto') {
       debugPrint('Player: Dolby Vision Profile 5 on a phone: using the server\'s version');
     }
@@ -1043,7 +1098,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     if (Downloads.instance.localFile(_id) != null && _ticksNow > 0) Downloads.instance.savePosition(_id, _ticksNow);
     if (_phone) WidgetsBinding.instance.removeObserver(this);
     _tapTimer?.cancel();
-    player.dispose();
+    // Stop the engine before its surface goes, then make Frame's window solid again.
+    final hadSurface = _surface;
+    player.dispose().whenComplete(() {
+      if (hadSurface) FrameVideo.close();
+    });
     _rootFocus.dispose();
     _playFocus.dispose();
     _backFocus.dispose();
@@ -1303,7 +1362,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       autofocus: true,
       onKeyEvent: _onKey,
       child: Scaffold(
-        backgroundColor: Colors.black,
+        // See-through over the video surface (the picture is drawn behind Frame's window).
+        backgroundColor: _surface ? Colors.transparent : Colors.black,
         body: MouseRegion(
           cursor: _controls ? SystemMouseCursors.basic : SystemMouseCursors.none,
           // Mouse movement shows the controls, but not while the controller is in use
@@ -1413,7 +1473,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   }
 
   // The video itself, with no built-in controls. Pinch on a phone fills the screen.
-  Widget _video() => Video(
+  Widget _video() => _surface
+      ? const SizedBox.expand()
+      : Video(
         controller: controller,
         controls: NoVideoControls,
         fill: Colors.black,

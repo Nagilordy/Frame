@@ -14,7 +14,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'banners.dart' show bannerHandlesKey, showBanner, bannerIcon;
 import 'crash_reports.dart' show startWithCrashReports;
-import 'surface_player.dart' show surfacePlayerSkipped;
+import 'video_surface.dart' show surfacePlayerSkipped;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
