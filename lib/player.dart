@@ -954,8 +954,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       await mpv.setProperty('demuxer-max-bytes', _phone ? '64MiB' : '256MiB');
       await mpv.setProperty('demuxer-max-back-bytes', _phone ? '32MiB' : '128MiB');
       await mpv.setProperty('demuxer-readahead-secs', '60');
-      // Jump to the nearest keyframe: much faster seeks.
-      await mpv.setProperty('hr-seek', 'no');
+      // Wi-Fi drops or a NAS waking up: reconnect and carry on instead of stopping the video
+      // (same as the PC's mpv window).
+      // (Each in its own try: an older libmpv that doesn't know a value mustn't stop the rest.)
+      try {
+        await mpv.setProperty('stream-lavf-o', 'reconnect=1,reconnect_on_network_error=1,reconnect_delay_max=4');
+      } catch (_) {}
+      // Old interlaced DVD and TV rips: remove the comb lines automatically (only when the
+      // file is interlaced; other videos are untouched). "auto" needs mpv 0.38 or newer.
+      if (!_phone) {
+        try {
+          await mpv.setProperty('deinterlace', 'auto');
+        } catch (_) {}
+      }
+      // Seeks: exact on the PC (the timeline lands where you point, like the mpv window);
+      // nearest keyframe on phones, which is much faster on a small CPU.
+      await mpv.setProperty('hr-seek', _phone ? 'no' : 'absolute');
       // mpv draws subtitles straight onto the video. This handles every kind, including
       // image subtitles from Blu-rays (PGS) and styled anime subtitles (ASS), with their own styling.
       await mpv.setProperty('sub-visibility', 'yes');
