@@ -3,7 +3,9 @@
 HERE="$(dirname "$(readlink -f "$0")")"
 export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH}"
 # Frame's new player (preview) needs X11 mode; Frame leaves this note when it's turned on (F9).
-if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/frame/x11-mode" ] && [ -z "$GDK_BACKEND" ]; then
+# (Set even if the desktop already chose a backend: some, like KDE on Bazzite, set
+# GDK_BACKEND=wayland, which would keep the new player off.)
+if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/frame/x11-mode" ]; then
   export GDK_BACKEND=x11
 fi
 exec "$HERE/usr/bin/player_test" "$@"

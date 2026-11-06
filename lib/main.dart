@@ -14,7 +14,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'banners.dart' show bannerHandlesKey, showBanner, bannerIcon;
 import 'crash_reports.dart' show startWithCrashReports;
-import 'surface_player.dart' show loadNewPlayerPreview, toggleNewPlayerPreview, newPlayerPreviewMessage;
+import 'surface_player.dart' show loadNewPlayerPreview, toggleNewPlayerPreview, newPlayerPreviewMessage, surfacePlayerSkipped;
 import 'gamepad.dart';
 import 'images.dart' show tidyArtworkCache;
 import 'native_player.dart' show findMpv;
@@ -57,6 +57,19 @@ class _TestAppState extends State<TestApp> {
   bool _meter = false;
 
   // F2 shows or hides Flutter's performance meter: two graphs of how long each frame takes.
+  void _previewSkipped() {
+    final why = surfacePlayerSkipped.value;
+    final ctx = _navigator.currentContext;
+    if (why == null || ctx == null || !ctx.mounted) return;
+    surfacePlayerSkipped.value = null;
+    showBanner(ctx,
+        picture: bannerIcon(Icons.hdr_off_rounded),
+        who: 'New player not used',
+        text: why,
+        line: const Color(0xFFF2B05A),
+        duration: const Duration(seconds: 7));
+  }
+
   bool _onKey(KeyEvent event) {
     if (event is KeyDownEvent && bannerHandlesKey(event.logicalKey)) return true;
     if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.f2) {
@@ -89,6 +102,8 @@ class _TestAppState extends State<TestApp> {
   void initState() {
     super.initState();
     HardwareKeyboard.instance.addHandler(_onKey);
+    // The new player (preview) wasn't used for a video: say why, once.
+    surfacePlayerSkipped.addListener(_previewSkipped);
     GamepadInput.start();
     SyncPlay.navigator = _navigator; // a video someone starts in your party can open from anywhere
   }
@@ -96,6 +111,7 @@ class _TestAppState extends State<TestApp> {
   @override
   void dispose() {
     HardwareKeyboard.instance.removeHandler(_onKey);
+    surfacePlayerSkipped.removeListener(_previewSkipped);
     super.dispose();
   }
 

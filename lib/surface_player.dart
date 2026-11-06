@@ -137,6 +137,7 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
     if (surface == null) {
       // No surface (older Windows, or it failed): the usual player instead.
       debugPrint('Surface player: no video surface, using the usual player');
+      surfacePlayerSkipped.value = "the video area couldn't be created on this system";
       Navigator.of(context).pushReplacement(MaterialPageRoute(
         builder: (_) => PlayerScreen(jf: widget.jf, item: widget.item, startTicks: widget.startTicks),
       ));
@@ -494,9 +495,23 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
       );
 }
 
+/// Why the preview player wasn't used for the last video (shown once, so a test can tell),
+/// or null when it was used or is off.
+final ValueNotifier<String?> surfacePlayerSkipped = ValueNotifier(null);
+
 /// Used by playerScreen: the preview player for this video, when it applies.
 Widget? surfacePlayerFor(Jellyfin jf, dynamic item, {required bool inParty, int? startTicks}) {
-  if (!canUseSurfacePlayer(inParty: inParty)) return null;
-  if (Platform.isLinux && !runningInX11) return null; // needs X11 mode (after a restart)
+  if (!FrameVideo.supported || !newPlayerPreview.value) return null;
+  String? why;
+  if (inParty) {
+    why = 'Watch together uses the usual player for now';
+  } else if (Platform.isLinux && !runningInX11) {
+    why = 'it needs X11 mode: restart Frame (Frame is in ${Platform.environment['GDK_BACKEND'] ?? 'Wayland'} mode)';
+  }
+  if (why != null) {
+    debugPrint('Surface player: not used, $why');
+    surfacePlayerSkipped.value = why;
+    return null;
+  }
   return SurfacePlayerScreen(jf: jf, item: item, startTicks: startTicks);
 }
