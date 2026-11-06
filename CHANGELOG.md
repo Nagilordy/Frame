@@ -5,6 +5,16 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **The player's new design on PC and TV.** Frame's player now has the design from the
+  canvas: a dark bar at the bottom with the timeline (hover it to see the time), the Audio,
+  Subtitles, Playback and Info tabs showing what's in use, and −10 / play / +30 in the middle.
+  Choosing a tab opens the sheet further, with the choices as big cards, subtitle size,
+  position and background as small pills, and speed under Playback. L1 / R1 switch tabs. Info
+  shows the episode with its picture and summary next to how it's playing (video, sound,
+  decoder, buffer, screen). The top shows how it plays, when it ends and who's watching
+  together. Up next is a card with the next episode's picture and a Play now button that
+  fills up as the countdown runs. Starting a video shows the loading screen with the show's
+  artwork and logo, where it resumes, and Cancel.
 - **One player: Frame's own** (Windows and Linux). Every video, including Watch together and
   the server's version, plays in Frame's player, drawn inside Frame's window; no separate mpv
   window. HDR films are shown converted to a normal picture for now: real HDR comes later.

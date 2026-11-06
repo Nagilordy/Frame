@@ -15,12 +15,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'gamepad.dart' show PadHint, PadHints, PadButton, padActive, fullScreenHint;
 import 'ui.dart'
-    show Frost, Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, fullScreen, tvBody, tvDisplay, kAccent,
-        phoneSidewaysOnly, kFg, kSoft, kPlaceholder, runtimeMinutes;
-import 'images.dart' show netImage;
+    show Focusable, FocusLinks, focusOn, isDesktop, toggleFullScreen, tvBody, tvDisplay,
+        phoneSidewaysOnly, kFg, kSoft, kPlaceholder, runtimeMinutes, TvCanvas, titleOf, episodeLine, sizeBucket, tvPx;
+import 'images.dart' show netImage, LogoImage;
 import 'main.dart' show Jellyfin;
 import 'banners.dart' show showPartyNotice;
-import 'syncplay.dart' show SyncPlay, RoomLink, RoomVideo;
+import 'syncplay.dart' show SyncPlay, SyncGroup, RoomLink, RoomVideo;
+import 'party_notice.dart' show partyColorOf;
 import 'perf.dart' show perfLog;
 import 'tracks.dart';
 import 'phone.dart';
@@ -96,7 +97,7 @@ class PlayerScreen extends StatefulWidget {
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-enum _Panel { none, playback, audio, subtitles }
+enum _Panel { none, playback, audio, subtitles, info }
 
 class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver {
   // A larger buffer keeps more of the file ready, which helps smoothness and seeking over the network.
@@ -637,69 +638,120 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => PlayerScreen(jf: widget.jf, item: next)));
   }
 
-  Widget _upNextCard() {
-    return Positioned(
-      right: 56,
-      bottom: 230,
-      child: StreamBuilder<Duration>(
-        stream: player.stream.position,
-        initialData: player.state.position,
-        builder: (_, snap) {
-          final at = _upNextAt(snap.data ?? Duration.zero);
-          if (at == null || _panel != _Panel.none) return const SizedBox.shrink();
-          final (left, span) = at;
-          return GestureDetector(
-            onTap: _playNext,
-            child: Container(
-              width: 600,
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A1E25),
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: const [BoxShadow(color: Color(0x8C000000), blurRadius: 60, offset: Offset(0, 20))],
-              ),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                Container(height: 4, color: kAccent),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(28, 18, 28, 20),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('UP NEXT', style: _body(15, weight: FontWeight.w700, color: _muted)),
-                    const SizedBox(height: 6),
-                    Text(_episodeTitle(_next), maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(24, weight: FontWeight.w700)),
-                    const SizedBox(height: 14),
-                    Row(children: [
-                      Container(
-                        height: 44,
-                        padding: const EdgeInsets.only(left: 16, right: 22),
-                        decoration: BoxDecoration(color: _fg, borderRadius: BorderRadius.circular(22)),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          const Icon(Icons.play_arrow_rounded, size: 26, color: _bg),
-                          const SizedBox(width: 6),
-                          Text('Play now', style: _body(20, weight: FontWeight.w700, color: _bg)),
-                        ]),
-                      ),
-                      if (padActive.value && !_controls) ...[
-                        const SizedBox(width: 22),
-                        Text('Select: play now   ·   Back: hide', style: _body(17, color: _soft)),
-                      ],
+  // PC and TV: a rounded card at the bottom right (above the bar when the controls are up),
+  // with the next episode's picture. Play now fills up like a timer; when it's full the next
+  // episode starts. "Watch the credits" hides the card and lets this one play to the end.
+  Widget _upNextCard() => Positioned.fill(
+        child: TvCanvas(
+          child: Stack(clipBehavior: Clip.none, children: [
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOutCubic,
+              right: 56,
+              bottom: _controls ? 274 : 56,
+              width: 720,
+              child: StreamBuilder<Duration>(
+                stream: player.stream.position,
+                initialData: player.state.position,
+                builder: (_, snap) {
+                  final at = _upNextAt(snap.data ?? Duration.zero);
+                  final next = _next;
+                  if (at == null || next == null || _panel != _Panel.none) return const SizedBox.shrink();
+                  final (left, span) = at;
+                  final fill = (1 - left / span).clamp(0.0, 1.0);
+                  final thumb = sizeBucket(tvPx(240));
+                  final mins = runtimeMinutes(next);
+                  final line = [
+                    if (next['ParentIndexNumber'] != null) 'S${next['ParentIndexNumber']}',
+                    if (next['IndexNumber'] != null) 'E${next['IndexNumber']}',
+                    if (mins > 0) '$mins min',
+                  ].join(' · ');
+                  return Container(
+                    height: 257,
+                    padding: const EdgeInsets.all(22),
+                    decoration: BoxDecoration(
+                      color: _sheet.withOpacity(0.89),
+                      borderRadius: BorderRadius.circular(28),
+                      boxShadow: const [BoxShadow(color: Color(0x80000000), blurRadius: 40, offset: Offset(0, 16))],
+                    ),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(16),
+                          child: SizedBox(
+                            width: 240,
+                            height: 135,
+                            child: netImage(widget.jf.image(next['Id'].toString(), 'Primary', maxWidth: thumb),
+                                cacheWidth: thumb,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => ColoredBox(color: _fg.withOpacity(0.13))),
+                          ),
+                        ),
+                        const SizedBox(width: 24),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            const SizedBox(height: 8),
+                            Text('UP NEXT · IN ${left.ceil()} S',
+                                style: _body(18, weight: FontWeight.w700, color: _muted).copyWith(letterSpacing: 1)),
+                            const SizedBox(height: 12),
+                            Text((next['Name'] ?? 'Next episode').toString(),
+                                maxLines: 1, overflow: TextOverflow.ellipsis, style: _display(28)),
+                            if (line.isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(line, style: _body(21, color: _soft)),
+                            ],
+                          ]),
+                        ),
+                      ]),
+                      const SizedBox(height: 20),
+                      Row(children: [
+                        // Selected while the controls are hidden, since Select / Enter then plays it.
+                        Focusable(
+                          onSelect: _playNext,
+                          builder: (f) => Container(
+                            height: 58,
+                            padding: const EdgeInsets.fromLTRB(18, 0, 26, 0),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(29),
+                              boxShadow: f || !_controls ? _ringOn : const [],
+                              gradient: LinearGradient(
+                                colors: const [_fg, _fg, Color(0xD1F4F5F7), Color(0xD1F4F5F7)],
+                                stops: [0, fill, fill, 1],
+                              ),
+                            ),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.play_arrow_rounded, size: 30, color: _bg),
+                              const SizedBox(width: 8),
+                              Text('Play now', style: _body(22, weight: FontWeight.w700, color: _bg)),
+                            ]),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Focusable(
+                          onSelect: () => setState(() => _nextDismissed = true),
+                          builder: (f) => AnimatedContainer(
+                            duration: const Duration(milliseconds: 140),
+                            height: 58,
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: f ? _fg : _fg.withOpacity(0.10),
+                              borderRadius: BorderRadius.circular(29),
+                              boxShadow: f ? _ringOn : const [],
+                            ),
+                            child: Text('Watch the credits',
+                                style: _body(22, weight: f ? FontWeight.w700 : FontWeight.w600, color: f ? _bg : _fg)),
+                          ),
+                        ),
+                      ]),
                     ]),
-                  ]),
-                ),
-                // Runs down to the end of the episode, when the next one starts by itself.
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FractionallySizedBox(
-                    widthFactor: (left / span).clamp(0.0, 1.0),
-                    child: Container(height: 4, color: kAccent),
-                  ),
-                ),
-              ]),
+                  );
+                },
+              ),
             ),
-          );
-        },
-      ),
-    );
-  }
+          ]),
+        ),
+      );
 
   static String _episodeTitle(dynamic ep) => [
         if (ep['ParentIndexNumber'] != null) 'S${ep['ParentIndexNumber']}',
@@ -791,6 +843,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         }
       }
     }));
+    // PC and TV: the loading screen goes once the video is on.
+    _subs.add(player.stream.buffering.listen((_) => _checkLoaded()));
+    _subs.add(player.stream.duration.listen((_) => _checkLoaded()));
     // The file's tracks are known: pick the remembered audio and subtitles.
     _subs.add(player.stream.tracks.listen((_) => _applyTrackPrefs()));
     // Close the player when the video ends.
@@ -1139,6 +1194,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _backFocus.dispose();
     _barFocus.dispose();
     _panelFirst.dispose();
+    for (final n in _tabFocus) {
+      n.dispose();
+    }
     super.dispose();
   }
 
@@ -1172,6 +1230,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
   void _hideControls() {
     _hideTimer?.cancel();
+    if (!_info) _statsTimer?.cancel();
     setState(() {
       _controls = false;
       _panel = _Panel.none;
@@ -1222,20 +1281,49 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
   void _openPanel(_Panel panel) {
     _hideTimer?.cancel();
-    setState(() => _panel = panel);
-    // Select the first choice once the panel is on screen.
+    setState(() {
+      _panel = panel;
+      _controls = true;
+      _chrome = true;
+    });
+    _statsTimer?.cancel();
+    if (panel == _Panel.info) {
+      _readStats();
+      _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _readStats());
+    }
+    // Select what's in use (or the first choice) once the panel is on screen; Info selects
+    // its tab.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _panelFirst.context != null) _panelFirst.requestFocus();
+      if (!mounted) return;
+      final tab = _tvTabs.indexOf(panel);
+      if (panel != _Panel.info && _panelFirst.context != null) {
+        _panelFirst.requestFocus();
+      } else if (tab >= 0 && _tabFocus[tab].context != null) {
+        _tabFocus[tab].requestFocus();
+      }
     });
   }
 
   void _closePanel() {
     setState(() => _panel = _Panel.none);
-    _playFocus.requestFocus();
+    if (!_info) _statsTimer?.cancel();
+    // The bar is rebuilt this frame; select Play once it's there.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _playFocus.requestFocus();
+    });
     _scheduleHide();
   }
 
   void _toggleInfo() {
+    // PC and TV: Info is a tab of the sheet.
+    if (!_phone) {
+      if (_panel == _Panel.info) {
+        _closePanel();
+      } else {
+        _openPanel(_Panel.info);
+      }
+      return;
+    }
     setState(() => _info = !_info);
     _statsTimer?.cancel();
     if (_info) {
@@ -1262,7 +1350,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     final decoderDropped = await p('decoder-frame-drop-count');
     final cache = await p('demuxer-cache-duration');
     final cacheSecs = double.tryParse(cache)?.toStringAsFixed(0) ?? cache;
+    // PC and TV: the same, as rows for the Info tab.
+    final details = _phone ? const <(String, String)>[] : await _readDetails(p, hw, dropped, cache);
     if (!mounted) return;
+    if (!_phone) _details = details;
     setState(() => _stats = 'Decoder  ${hw.isEmpty || hw == 'no' ? 'CPU' : 'GPU ($hw)'}\n'
         'Dropped frames  $dropped / $decoderDropped\n'
         'Buffered  ${cacheSecs}s\n'
@@ -1270,6 +1361,60 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         '${_isDolbyVisionOnly && !_server ? '\nDolby Vision P5: colours converted by libplacebo' : ''}'
         '${!_server && _level > 0 ? '\nPicture  eased for this device (step $_level)' : ''}'
         '\nPlayback choice  ${_mode == 'auto' ? 'Automatic' : _mode == 'server' ? 'Server' : 'Original file'}');
+  }
+
+  // Info's rows: the video, sound, subtitles, where it comes from, the decoder, the buffer and
+  // the screen.
+  Future<List<(String, String)>> _readDetails(
+      Future<String> Function(String) p, String hw, String dropped, String cache) async {
+    final w = int.tryParse(await p('video-params/w')) ?? 0;
+    final h = int.tryParse(await p('video-params/h')) ?? 0;
+    final gamma = await p('video-params/gamma');
+    final codec = await p('video-format');
+    final fps = double.tryParse(await p('container-fps')) ?? 0;
+    final targetGamma = await p('video-target-params/gamma');
+    final hz = double.tryParse(await p('display-fps')) ?? 0;
+    final ow = int.tryParse(await p('osd-width')) ?? 0;
+    final oh = int.tryParse(await p('osd-height')) ?? 0;
+    final quality = _qualityLine(widget.item);
+    String fpsText(double f) => '${f.toStringAsFixed(3).replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\.$'), '')} fps';
+    final video = [
+      if (h > 0)
+        (w >= 3200 || h >= 2000)
+            ? '4K'
+            : (w >= 1800 || h >= 1000)
+                ? '1080p'
+                : (w >= 1200 || h >= 700)
+                    ? '720p'
+                    : '${h}p',
+      if (codec.isNotEmpty && codec != '?') codec.toUpperCase(),
+      if (fps > 0) fpsText(fps),
+      quality.contains('Dolby')
+          ? 'Dolby Vision'
+          : (gamma == 'pq' || gamma == 'hlg' || quality.contains('HDR'))
+              ? 'HDR'
+              : 'SDR',
+    ].join(' · ');
+    final secs = double.tryParse(cache) ?? 0;
+    final buffered = secs >= 60 ? '${secs ~/ 60} min ${(secs % 60).floor()} s' : '${secs.floor()} s';
+    final drops = int.tryParse(dropped) ?? 0;
+    return [
+      ('Video', video),
+      ('Audio', _tabValue(_Panel.audio)),
+      ('Subtitles', _tabValue(_Panel.subtitles)),
+      ('Playing', _server ? 'Converted by your server' : 'Original file · direct play'),
+      ('Decoder', hw.isEmpty || hw == 'no' || hw == '?' ? 'CPU' : 'GPU · ${hw[0].toUpperCase()}${hw.substring(1)}'),
+      ('Buffered', '$buffered · $drops ${drops == 1 ? 'dropped frame' : 'dropped frames'}'),
+      (
+        'Your screen',
+        [
+          (targetGamma == 'pq' || targetGamma == 'hlg') ? 'HDR' : 'SDR',
+          if (hz > 0) '${hz.round()} Hz',
+          if (ow > 0) '$ow × $oh',
+        ].join(' · ')
+      ),
+      if (!_server && _level > 0) ('Picture', 'Eased for this device (step $_level)'),
+    ];
   }
 
   // ---------- Keyboard ----------
@@ -1287,13 +1432,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       return KeyEventResult.ignored;
     }
 
+    // PC and TV, while the loading screen shows: Back cancels.
+    if (!_phone && !_loaded && (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace)) {
+      Navigator.of(context).maybePop();
+      return KeyEventResult.handled;
+    }
+
     // Space (or Options on the controller) always plays or pauses.
     if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.mediaPlayPause) {
       _togglePlay();
       return KeyEventResult.handled;
     }
     // Triangle / Y: playback info, like in the mpv player.
-    if (key == LogicalKeyboardKey.contextMenu && _panel == _Panel.none) {
+    if (key == LogicalKeyboardKey.contextMenu && (_panel == _Panel.none || _panel == _Panel.info)) {
       _toggleInfo();
       return KeyEventResult.handled;
     }
@@ -1308,6 +1459,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     if (_panel != _Panel.none) {
+      // PC and TV: L1 / R1 switch between the sheet's tabs.
+      if (!_phone && (key == LogicalKeyboardKey.mediaRewind || key == LogicalKeyboardKey.mediaFastForward)) {
+        final i = _tvTabs.indexOf(_panel);
+        final n = (i + (key == LogicalKeyboardKey.mediaFastForward ? 1 : -1)).clamp(0, _tvTabs.length - 1);
+        _switchTab(_tvTabs[n]);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) focusOn(_tabFocus[n]);
+        });
+        return KeyEventResult.handled;
+      }
       if (key == LogicalKeyboardKey.escape || key == LogicalKeyboardKey.backspace) {
         _closePanel();
         return KeyEventResult.handled;
@@ -1374,8 +1535,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     // Controller legend: hidden while just watching, so the picture stays clean.
     final hints = _failure != null
         ? const [PadHint(PadButton.back, 'Back')]
+        : !_phone && !_loaded
+        ? const [PadHint(PadButton.back, 'Cancel')]
         : _panel != _Panel.none
-        ? const [PadHint(PadButton.select, 'Select'), PadHint(PadButton.back, 'Close')]
+        ? [
+            const PadHint(PadButton.select, 'Select'),
+            if (!_phone) const PadHint(PadButton.skip, 'Switch'),
+            const PadHint(PadButton.back, 'Close'),
+          ]
         : _controls
             ? [
                 const PadHint(PadButton.select, 'Select'),
@@ -1449,7 +1616,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 child: StreamBuilder<bool>(
                   stream: player.stream.buffering,
                   initialData: true,
-                  builder: (_, snap) => snap.data == true
+                  builder: (_, snap) => snap.data == true && (_phone || _loadingGone)
                       ? const Center(
                           child: SizedBox(
                             width: 56,
@@ -1474,27 +1641,33 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                   onEnd: () {
                     if (!_controls && _chrome && mounted) setState(() => _chrome = false);
                   },
-                  child: _chrome
-                      ? Stack(children: [
-                          if (_phone) ...[
-                            _phoneTopBar(title, episodeLine),
-                            _phoneCenter(),
-                            _phoneBottomBar(),
-                          ] else ...[
-                            _topBar(title, episodeLine),
-                            _bottomBar(),
-                          ],
-                        ])
-                      : const SizedBox.shrink(),
+                  child: !_chrome
+                      ? const SizedBox.shrink()
+                      : _phone
+                          ? Stack(children: [
+                              _phoneTopBar(title, episodeLine),
+                              _phoneCenter(),
+                              _phoneBottomBar(),
+                            ])
+                          // PC and TV: hidden under the loading screen until the video is on.
+                          : !_loaded
+                              ? const SizedBox.shrink()
+                              : TvCanvas(
+                                  child: Stack(clipBehavior: Clip.none, children: [
+                                    _tvTop(title, episodeLine),
+                                    if (_panel == _Panel.none) _tvBar() else _tvSheet(),
+                                  ]),
+                                ),
                 ),
               ),
             ),
 
             if (_phone) ..._phoneOverlays(),
             if (_next != null) _phone ? _phoneUpNext() : _upNextCard(),
-            if (_info) _phone ? _phoneInfo() : _infoBox(),
-            if (_panel != _Panel.none) _phone ? _phonePanel() : _trackPanel(),
+            if (_phone && _info) _phoneInfo(),
+            if (_phone && _panel != _Panel.none) _phonePanel(),
             if (_subEdit) _phoneSubEdit(),
+            if (!_phone && !_loadingGone) _tvLoading(),
             if (_failure != null) _failureBox(),
           ]),
         ),
@@ -1938,24 +2111,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   static String _speedText(double s) => '${s == s.roundToDouble() ? s.toInt() : s}×';
 
   // The choices in the Audio, Subtitles and Playback menus (same as the TV panel).
-  List<({String label, String note, bool selected, VoidCallback onSelect})> _choices() {
+  List<({String label, String note, bool selected, VoidCallback onSelect})> _choices([_Panel? which]) {
+    final panel = which ?? _panel;
     final out = <({String label, String note, bool selected, VoidCallback onSelect})>[];
     void add(String label, bool selected, VoidCallback onSelect, {String note = ''}) =>
         out.add((label: label, note: note, selected: selected, onSelect: onSelect));
 
-    if (_panel == _Panel.playback) {
+    if (panel == _Panel.playback) {
       add('Automatic', _mode == 'auto', () => _setMode('auto'),
           note: "The original, the server's version if it struggles");
       add('Original file · best quality', _mode == 'original', () => _setMode('original'));
       add('Converted by the server · smoothest', _mode == 'server', () => _setMode('server'));
-    } else if (_server && _panel == _Panel.audio) {
+    } else if (_server && panel == _Panel.audio) {
       final audio = _streams('Audio');
       final current = _serverAudio ?? (audio.firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index']);
       for (final a in audio) {
         final index = (a['Index'] ?? -1) as int;
         add(_streamLabel(a), index == current, () => _chooseServerAudio(index));
       }
-    } else if (_server && _panel == _Panel.subtitles) {
+    } else if (_server && panel == _Panel.subtitles) {
       add('Off', _serverSub == null && _serverTextSub == null, () => _chooseServerSubtitle(null));
       for (final st in _streams('Subtitle')) {
         final index = (st['Index'] ?? -1) as int;
@@ -1963,7 +2137,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         add(_streamLabel(st), index == _serverSub || index == _serverTextSub, () => _chooseServerSubtitle(st),
             note: text ? '' : 'Drawn in by the server');
       }
-    } else if (_panel == _Panel.audio) {
+    } else if (panel == _Panel.audio) {
       final current = player.state.track.audio;
       for (final t in player.state.tracks.audio) {
         if (t.id == 'no') continue;
@@ -2383,176 +2557,818 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
-  Widget _topBar(String title, String episodeLine) {
+  // ---------- PC and TV: the controls ----------
+  //
+  // The design from the canvas, drawn on a 1920 × 1080 canvas (TvCanvas) so it looks the same
+  // at any window size:
+  // - Top: Back, the title and episode; on the right how it plays, when it ends and who's
+  //   watching together.
+  // - Bottom: the bar, a dark sheet folded down: the timeline with the times either side, the
+  //   Audio / Subtitles / Playback / Info tabs on the left (each with what's in use under it)
+  //   and −10, play, +30 in the middle.
+  // - Choosing a tab opens the sheet further: the same tabs along the top (L1 / R1 switch),
+  //   the choices as big cards in a row, small pills for subtitle style or speed, and for Info
+  //   the episode and how it's playing.
+
+  static const _sheet = Color(0xFF12151B);
+  static const _cardInk = Color(0xFF3B4250); // second line on a selected (white) card
+  // Selected: a dark gap, then a white ring, like everything selected in Frame.
+  static const _ringOn = [BoxShadow(color: _sheet, spreadRadius: 4), BoxShadow(color: _fg, spreadRadius: 9)];
+  static const _tvTabs = [_Panel.audio, _Panel.subtitles, _Panel.playback, _Panel.info];
+  final _tabFocus = [for (var i = 0; i < 4; i++) FocusNode()];
+
+  static String _tabName(_Panel p) => switch (p) {
+        _Panel.audio => 'Audio',
+        _Panel.subtitles => 'Subtitles',
+        _Panel.playback => 'Playback',
+        _Panel.info => 'Info',
+        _Panel.none => '',
+      };
+
+  // What's in use, under each tab on the bar.
+  String _tabValue(_Panel p) {
+    switch (p) {
+      case _Panel.info:
+        return _qualityLine(widget.item);
+      case _Panel.playback:
+        final mode = _mode == 'auto' ? 'Automatic' : (_mode == 'server' ? 'Server version' : 'Original');
+        return _speed == 1.0 ? mode : '$mode · ${_speedText(_speed)}';
+      case _Panel.audio:
+      case _Panel.subtitles:
+        final chosen = _choices(p).where((c) => c.selected).toList();
+        if (chosen.isEmpty) return p == _Panel.subtitles ? 'Off' : '';
+        return chosen.first.label.split(' · ').take(2).join(' · ');
+      case _Panel.none:
+        return '';
+    }
+  }
+
+  // "Ends at 21:40" (taking the playback speed into account).
+  String _endsAt(Duration pos) {
+    final dur = player.state.duration;
+    if (dur <= Duration.zero) return '';
+    final left = dur > pos ? dur - pos : Duration.zero;
+    final speed = _speed <= 0 ? 1.0 : _speed;
+    final t = DateTime.now().add(Duration(milliseconds: (left.inMilliseconds / speed).round()));
+    return 'Ends at ${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+  }
+
+  // A round button: faint glass, white with the ring when selected.
+  Widget _tvRound(bool f, double size, Widget child) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        width: size,
+        height: size,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: f ? _fg : _fg.withOpacity(0.12),
+          boxShadow: f ? _ringOn : const [],
+        ),
+        child: child,
+      );
+
+  Widget _tvTop(String title, String episodeLine) {
     final quality = _qualityLine(widget.item);
+    final group = widget.sync?.group;
     return Positioned(
       left: 0,
       right: 0,
       top: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(48, 36, 56, 80),
-        decoration: BoxDecoration(
+      height: 230,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Colors.black.withOpacity(0.75), Colors.black.withOpacity(0)],
+            colors: [Color(0xB8000000), Color(0x00000000)],
           ),
         ),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-          FocusLinks(
-            down: () => _go(_barFocus),
-            child: _iconButton(Icons.arrow_back_rounded, () => Navigator.of(context).maybePop(),
-                label: 'Back', focusNode: _backFocus),
+        child: Stack(clipBehavior: Clip.none, children: [
+          Positioned(
+            left: 48,
+            top: 40,
+            child: FocusLinks(
+              down: () => _go(_barFocus),
+              child: Focusable(
+                focusNode: _backFocus,
+                onSelect: () => Navigator.of(context).maybePop(),
+                builder: (f) => _tvRound(f, 52, Icon(Icons.arrow_back_rounded, size: 28, color: f ? _bg : _fg)),
+              ),
+            ),
           ),
-          const SizedBox(width: 24),
-          Expanded(
+          Positioned(
+            left: 124,
+            top: 36,
+            right: 720,
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: _display(30), maxLines: 1, overflow: TextOverflow.ellipsis),
+              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: _display(34)),
               if (episodeLine.isNotEmpty) ...[
                 const SizedBox(height: 6),
-                Text(episodeLine, style: _body(20, color: _soft), maxLines: 1, overflow: TextOverflow.ellipsis),
+                Text(episodeLine, maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(22, color: _soft)),
               ],
             ]),
           ),
-          if (quality.isNotEmpty)
-            Text(quality, style: _body(18, weight: FontWeight.w600, color: _soft)),
+          Positioned(
+            right: 56,
+            top: 52,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              if (quality.isNotEmpty) Text(quality, style: _body(20, weight: FontWeight.w600, color: _soft)),
+              StreamBuilder<Duration>(
+                stream: player.stream.position,
+                initialData: player.state.position,
+                builder: (_, snap) {
+                  final ends = _endsAt(snap.data ?? Duration.zero);
+                  if (ends.isEmpty) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(ends, style: _body(20, color: _muted)),
+                  );
+                },
+              ),
+              // Watch together: who's in the room, each in their colour.
+              if (group != null)
+                ValueListenableBuilder<SyncGroup?>(
+                  valueListenable: group,
+                  builder: (_, g, __) {
+                    final people = g?.people ?? const <String>[];
+                    if (people.isEmpty) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 14),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Text('Watching together', style: _body(19, weight: FontWeight.w600, color: _soft)),
+                        const SizedBox(width: 6),
+                        for (final p in people)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8),
+                            child: Container(
+                              width: 36,
+                              height: 36,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(shape: BoxShape.circle, color: Color(partyColorOf(p))),
+                              child: Text(p.isEmpty ? '?' : p.characters.first.toUpperCase(),
+                                  style: _display(17).copyWith(color: _bg)),
+                            ),
+                          ),
+                      ]),
+                    );
+                  },
+                ),
+            ]),
+          ),
         ]),
       ),
     );
   }
 
-  Widget _bottomBar() {
+  // The timeline with the times either side: the real one on the bar, a plain one on the open
+  // sheet (so you never lose your place).
+  Widget _tvTimeline({required bool interactive}) => StreamBuilder<Duration>(
+        stream: player.stream.position,
+        initialData: player.state.position,
+        builder: (_, snap) {
+          final pos = snap.data ?? Duration.zero;
+          final dur = player.state.duration;
+          final left = dur > pos ? dur - pos : Duration.zero;
+          final timeStyle = _body(22, weight: FontWeight.w600, color: _soft);
+          final Widget bar;
+          if (interactive) {
+            bar = FocusLinks(
+              up: () => _go(_backFocus),
+              down: () => _go(_playFocus),
+              child: _ProgressBar(
+                focusNode: _barFocus,
+                position: pos,
+                duration: dur,
+                buffered: player.state.buffer,
+                onSeek: (to) {
+                  _lastSeek = DateTime.now();
+                  final room = _room;
+                  if (room != null) {
+                    room.seek(to.inMicroseconds / 1e6);
+                  } else {
+                    player.seek(to);
+                  }
+                  _showControls();
+                },
+                onKeySkip: (forward) => _skip(forward ? _forward : -_back),
+              ),
+            );
+          } else {
+            final played = dur.inMilliseconds <= 0 ? 0.0 : (pos.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0);
+            bar = Container(
+              height: 6,
+              alignment: Alignment.centerLeft,
+              decoration: BoxDecoration(color: _fg.withOpacity(0.18), borderRadius: BorderRadius.circular(3)),
+              child: FractionallySizedBox(
+                widthFactor: played,
+                child: Container(decoration: BoxDecoration(color: _fg, borderRadius: BorderRadius.circular(3))),
+              ),
+            );
+          }
+          return Row(children: [
+            SizedBox(width: 94, child: Text(_clock(pos), style: timeStyle)),
+            Expanded(child: bar),
+            SizedBox(width: 94, child: Text('-${_clock(left)}', textAlign: TextAlign.right, style: timeStyle)),
+          ]);
+        },
+      );
+
+  // The bar: the same sheet as Audio / Subtitles, folded down.
+  Widget _tvBar() {
     return Positioned(
       left: 0,
       right: 0,
       bottom: 0,
-      child: ValueListenableBuilder<bool>(
-        valueListenable: padActive,
-        // With a controller, the buttons sit a little higher to leave room for the legend.
-        builder: (context, pad, child) => DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.bottomCenter,
-              end: Alignment.topCenter,
-              colors: [Colors.black.withOpacity(0.85), Colors.black.withOpacity(0)],
+      height: 330,
+      child: Stack(clipBehavior: Clip.none, children: [
+        // A soft shade behind it, so it reads over bright scenes.
+        const Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [Color(0xB8000000), Color(0x00000000)],
+              ),
             ),
           ),
-          child: AnimatedPadding(
-            duration: const Duration(milliseconds: 200),
-            padding: EdgeInsets.fromLTRB(56, 100, 56, pad ? 100 : 40),
-            child: child,
-          ),
         ),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          // Time and progress update on their own, without redrawing the rest of the screen.
-          StreamBuilder<Duration>(
-            stream: player.stream.position,
-            initialData: player.state.position,
-            builder: (_, snap) {
-              final pos = snap.data ?? Duration.zero;
-              final dur = player.state.duration;
-              final left = dur > pos ? dur - pos : Duration.zero;
-              final endsAt = DateTime.now().add(left);
-              final endsText =
-                  '${endsAt.hour.toString().padLeft(2, '0')}:${endsAt.minute.toString().padLeft(2, '0')}';
-              return Column(children: [
-                FocusLinks(
-                  up: () => _go(_backFocus),
-                  down: () => _go(_playFocus),
-                  child: _ProgressBar(
-                  focusNode: _barFocus,
-                  position: pos,
-                  duration: dur,
-                  buffered: player.state.buffer,
-                  onSeek: (to) {
-                    _lastSeek = DateTime.now();
-                    final room = _room;
-                    if (room != null) {
-                      room.seek(to.inMicroseconds / 1e6);
-                    } else {
-                      player.seek(to);
-                    }
-                    _showControls();
-                  },
-                  onKeySkip: (forward) => _skip(forward ? _forward : -_back),
-                ),
-                ),
-                const SizedBox(height: 12),
-                Row(children: [
-                  Text(_clock(pos), style: _body(18, color: _soft)),
-                  const Spacer(),
-                  if (dur > Duration.zero) Text('Ends at $endsText', style: _body(18, color: _muted)),
-                  const Spacer(),
-                  Text('-${_clock(left)}', style: _body(18, color: _soft)),
-                ]),
-              ]);
-            },
-          ),
-          const SizedBox(height: 10),
-          FocusLinks(
-            up: () => _go(_barFocus),
-            down: () => true, // nothing below the buttons
-            child: SizedBox(
-            height: 64,
-            child: Stack(alignment: Alignment.center, children: [
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                _iconButton(Icons.replay_10_rounded, () => _skip(-_back), label: 'Back 10 seconds'),
-                const SizedBox(width: 22),
-                StreamBuilder<bool>(
-                  stream: player.stream.playing,
-                  initialData: player.state.playing,
-                  builder: (_, snap) => _iconButton(
-                    snap.data == true ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                    _togglePlay,
-                    size: 64,
-                    iconSize: 36,
-                    focusNode: _playFocus,
-                    label: 'Play or pause',
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 250,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: _sheet.withOpacity(0.58),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
+            ),
+            child: Stack(clipBehavior: Clip.none, children: [
+              // The handle: the sheet opens further.
+              Positioned(
+                top: 10,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Container(
+                    width: 64,
+                    height: 5,
+                    decoration: BoxDecoration(color: _fg.withOpacity(0.25), borderRadius: BorderRadius.circular(3)),
                   ),
                 ),
-                const SizedBox(width: 22),
-                _iconButton(Icons.forward_30_rounded, () => _skip(_forward), label: 'Forward 30 seconds'),
-              ]),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  _iconButton(Icons.tune_rounded, () => _openPanel(_Panel.playback), label: 'Playback'),
-                  const SizedBox(width: 12),
-                  _iconButton(Icons.graphic_eq_rounded, () => _openPanel(_Panel.audio), label: 'Audio'),
-                  const SizedBox(width: 12),
-                  _iconButton(Icons.closed_caption_outlined, () => _openPanel(_Panel.subtitles), label: 'Subtitles'),
-                  const SizedBox(width: 12),
-                  _iconButton(Icons.info_outline_rounded, _toggleInfo, label: 'Playback info'),
-                  if (isDesktop) ...[
-                    const SizedBox(width: 12),
-                    ValueListenableBuilder<bool>(
-                      valueListenable: fullScreen,
-                      builder: (_, full, __) => _iconButton(
-                        full ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
-                        toggleFullScreen,
-                        label: 'Full screen',
-                      ),
+              ),
+              Positioned(left: 56, right: 56, top: 54 - 22, height: 44, child: _tvTimeline(interactive: true)),
+              Positioned(
+                left: 56,
+                right: 56,
+                top: 160 - 46,
+                height: 92,
+                child: FocusLinks(
+                  up: () => _go(_barFocus),
+                  down: () => true, // nothing below the buttons
+                  child: Stack(alignment: Alignment.center, clipBehavior: Clip.none, children: [
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        for (final p in _tvTabs) Padding(padding: const EdgeInsets.only(right: 6), child: _tvBarTab(p)),
+                      ]),
                     ),
-                  ],
-                ]),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      Focusable(
+                        onSelect: () => _skip(-_back),
+                        builder: (f) => _tvRound(f, 64, Text('−10', style: _body(18, weight: FontWeight.w800, color: f ? _bg : _fg))),
+                      ),
+                      const SizedBox(width: 26),
+                      StreamBuilder<bool>(
+                        stream: player.stream.playing,
+                        initialData: player.state.playing,
+                        builder: (_, snap) => Focusable(
+                          focusNode: _playFocus,
+                          onSelect: _togglePlay,
+                          builder: (f) => _tvRound(
+                            f,
+                            84,
+                            Icon(snap.data == true ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                                size: 44, color: f ? _bg : _fg),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 26),
+                      Focusable(
+                        onSelect: () => _skip(_forward),
+                        builder: (f) => _tvRound(f, 64, Text('+30', style: _body(18, weight: FontWeight.w800, color: f ? _bg : _fg))),
+                      ),
+                    ]),
+                  ]),
+                ),
               ),
             ]),
           ),
+        ),
+      ]),
+    );
+  }
+
+  // A tab on the bar: its name, and what's in use underneath.
+  Widget _tvBarTab(_Panel p) {
+    final value = _tabValue(p);
+    return Focusable(
+      onSelect: () {
+        if (p == _Panel.info) {
+          _toggleInfo();
+        } else {
+          _openPanel(p);
+        }
+      },
+      builder: (f) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        height: 76,
+        padding: const EdgeInsets.symmetric(horizontal: 22),
+        decoration: BoxDecoration(
+          color: f ? _fg : Colors.transparent,
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: f ? _ringOn : const [],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_tabName(p), style: _body(23, weight: FontWeight.w700, color: f ? _bg : _fg)),
+            if (value.isNotEmpty)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Text(value,
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(18, color: f ? _cardInk : _muted)),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // The open sheet: Audio, Subtitles, Playback or Info.
+  Widget _tvSheet() {
+    final p = _panel;
+    final info = p == _Panel.info;
+    final choices = info ? const <({String label, String note, bool selected, VoidCallback onSelect})>[] : _choices();
+    final speed = p == _Panel.playback && _room == null;
+    final height = (info || p == _Panel.subtitles || speed) ? 600.0 : 500.0;
+    var focusIdx = choices.indexWhere((c) => c.selected);
+    if (focusIdx < 0) focusIdx = 0;
+    return Positioned.fill(
+      child: Stack(clipBehavior: Clip.none, children: [
+        // Dims the video; clicking it closes the sheet.
+        Positioned.fill(
+          child: GestureDetector(onTap: _closePanel, child: const ColoredBox(color: Color(0x40000000))),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: height,
+          child: GestureDetector(
+            onTap: () {}, // empty parts of the sheet do nothing
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: _sheet.withOpacity(0.69),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(36)),
+              ),
+              // Its own focus scope: arrows stay inside the sheet while it's open.
+              child: FocusScope(
+                child: Stack(clipBehavior: Clip.none, children: [
+                  Positioned(left: 56, right: 56, top: 54 - 22, height: 44, child: _tvTimeline(interactive: false)),
+                  Positioned(
+                    left: 56,
+                    top: 110,
+                    height: 56,
+                    // Down goes to what's in use, not just the card under the tab.
+                    child: FocusLinks(
+                      down: () => _panel != _Panel.info && focusOn(_panelFirst),
+                      child: Row(children: [
+                        for (var i = 0; i < _tvTabs.length; i++)
+                          Padding(padding: const EdgeInsets.only(right: 10), child: _tvSheetTab(i)),
+                      ]),
+                    ),
+                  ),
+                  if (info)
+                    ..._tvInfo()
+                  else ...[
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      top: 200 - 12,
+                      height: 150 + 24,
+                      child: choices.isEmpty
+                          ? Padding(
+                              padding: const EdgeInsets.fromLTRB(56, 52, 56, 0),
+                              child: Text(
+                                  p == _Panel.audio ? 'This video has no sound tracks.' : 'Nothing to choose here.',
+                                  style: _body(24, color: _muted)),
+                            )
+                          // Up goes back to this sheet's own tab (moving onto another tab
+                          // would switch to it).
+                          : FocusLinks(
+                              up: () => focusOn(_tabFocus[_tvTabs.indexOf(_panel)]),
+                              child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              padding: const EdgeInsets.symmetric(horizontal: 56, vertical: 12),
+                              clipBehavior: Clip.none,
+                              cacheExtent: 4000, // every card exists, so the chosen one can be selected
+                              itemCount: choices.length,
+                              separatorBuilder: (_, __) => const SizedBox(width: 24),
+                              itemBuilder: (_, i) => _tvCard(choices[i], i == focusIdx ? _panelFirst : null),
+                            ),
+                            ),
+                    ),
+                    if (p == _Panel.playback)
+                      Positioned(
+                        left: 56,
+                        top: 200 + 150 + 30,
+                        child: Text(
+                          _server
+                              ? 'Now playing the version your server converts on the NAS.'
+                              : 'Now playing the original file, straight from the NAS.',
+                          style: _body(20, color: _muted),
+                        ),
+                      ),
+                    if (p == _Panel.subtitles)
+                      Positioned(
+                        left: 56,
+                        right: 56,
+                        top: 200 + 150 + 56,
+                        child: _tvPillGroups([
+                          (
+                            'Size',
+                            [
+                              for (final (label, v) in const [('Small', 0.8), ('Medium', 1.0), ('Large', 1.3)])
+                                (label, (_subScale - v).abs() < 0.05, () => _changeSubStyle(scale: v)),
+                            ]
+                          ),
+                          (
+                            'Position',
+                            [
+                              ('Bottom', _subPos >= 99, () => _changeSubStyle(pos: 100)),
+                              ('Higher', _subPos < 99, () => _changeSubStyle(pos: 88)),
+                            ]
+                          ),
+                          (
+                            'Background',
+                            [
+                              ('Off', !_subBox, () => _changeSubStyle(box: false)),
+                              ('Box', _subBox, () => _changeSubStyle(box: true)),
+                            ]
+                          ),
+                        ]),
+                      ),
+                    if (speed)
+                      Positioned(
+                        left: 56,
+                        right: 56,
+                        top: 200 + 150 + 84,
+                        child: _tvPillGroups([
+                          (
+                            'Speed',
+                            [
+                              for (final s in const [0.75, 1.0, 1.25, 1.5, 2.0])
+                                (_speedText(s), _speed == s, () => _setSpeed(s)),
+                            ]
+                          ),
+                        ]),
+                      ),
+                  ],
+                ]),
+              ),
+            ),
           ),
+        ),
+      ]),
+    );
+  }
+
+  // A tab along the top of the open sheet. Moving onto it with the controller switches to it.
+  Widget _tvSheetTab(int i) {
+    final p = _tvTabs[i];
+    final on = _panel == p;
+    return Focusable(
+      key: ValueKey('sheet tab $i'),
+      focusNode: _tabFocus[i],
+      onFocus: (viaMouse) {
+        if (!viaMouse) _switchTab(p);
+      },
+      onSelect: () => _switchTab(p),
+      builder: (f) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        height: 56,
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: f ? _fg : (on ? _fg.withOpacity(0.16) : Colors.transparent),
+          borderRadius: BorderRadius.circular(28),
+          boxShadow: f ? _ringOn : const [],
+        ),
+        child: Text(_tabName(p),
+            style: _body(24, weight: on || f ? FontWeight.w700 : FontWeight.w600, color: f ? _bg : (on ? _fg : _soft))),
+      ),
+    );
+  }
+
+  void _switchTab(_Panel p) {
+    if (_panel == p || !mounted) return;
+    setState(() => _panel = p);
+    _statsTimer?.cancel();
+    if (p == _Panel.info) {
+      _readStats();
+      _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _readStats());
+    }
+  }
+
+  // A choice: a big card. The first part of its name large, the rest along the bottom.
+  // Choosing a track or a mode uses it and closes the sheet.
+  Widget _tvCard(({String label, String note, bool selected, VoidCallback onSelect}) c, FocusNode? node) {
+    final parts = c.label.split(' · ');
+    final rest = [...parts.skip(1), if (c.note.isNotEmpty) c.note].join(' · ');
+    void choose() {
+      c.onSelect();
+      _closePanel();
+    }
+
+    return Focusable(
+      focusNode: node,
+      onSelect: choose,
+      builder: (f) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        width: 300,
+        height: 150,
+        padding: const EdgeInsets.fromLTRB(24, 22, 20, 20),
+        decoration: BoxDecoration(
+          color: f ? _fg : _fg.withOpacity(c.selected ? 0.18 : 0.08),
+          borderRadius: BorderRadius.circular(26),
+          boxShadow: f ? _ringOn : const [],
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+              child: Text(parts.first,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: _body(26, weight: f || c.selected ? FontWeight.w700 : FontWeight.w600, color: f ? _bg : _fg)),
+            ),
+            if (c.selected) Icon(Icons.check_rounded, size: 30, color: f ? _bg : _fg),
+          ]),
+          const Spacer(),
+          if (rest.isNotEmpty)
+            Text(rest, maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(20, color: f ? _cardInk : _muted)),
         ]),
       ),
     );
   }
 
-  Widget _infoBox() {
-    return Positioned(
-      top: 150,
-      right: 56,
+  // Small choices in named groups ("Size: Small Medium Large"). They stay open, so you can see
+  // the change on the picture.
+  Widget _tvPillGroups(List<(String, List<(String, bool, VoidCallback)>)> groups) => Wrap(
+        runSpacing: 18,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final (name, pills) in groups)
+            Padding(
+              padding: const EdgeInsets.only(right: 30),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Text(name, style: _body(21, color: _muted)),
+                const SizedBox(width: 16),
+                for (final (label, on, act) in pills)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Focusable(
+                      onSelect: act,
+                      builder: (f) => AnimatedContainer(
+                        duration: const Duration(milliseconds: 140),
+                        height: 48,
+                        padding: const EdgeInsets.symmetric(horizontal: 22),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: f ? _fg : _fg.withOpacity(on ? 0.23 : 0.08),
+                          borderRadius: BorderRadius.circular(24),
+                          boxShadow: f ? _ringOn : const [],
+                        ),
+                        child: Text(label,
+                            style: _body(21, weight: f || on ? FontWeight.w700 : FontWeight.w600, color: f ? _bg : _fg)),
+                      ),
+                    ),
+                  ),
+              ]),
+            ),
+        ],
+      );
+
+  // Info: the episode on the left (picture, title, line, summary), the details on the right.
+  List<(String, String)> _details = const [];
+
+  List<Widget> _tvInfo() {
+    final item = widget.item;
+    final isEpisode = item['Type'] == 'Episode';
+    final mins = runtimeMinutes(item);
+    final line = [
+      if (isEpisode && item['ParentIndexNumber'] != null) 'S${item['ParentIndexNumber']}',
+      if (isEpisode && item['IndexNumber'] != null) 'E${item['IndexNumber']}',
+      if (item['ProductionYear'] != null) '${item['ProductionYear']}',
+      if (mins > 0) '$mins min',
+    ].join(' · ');
+    final pic = sizeBucket(tvPx(300));
+    return [
+      Positioned(
+        left: 56,
+        top: 206,
+        width: 300,
+        height: 169,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(18),
+          child: netImage(widget.jf.thumbFor(item, maxWidth: pic),
+              cacheWidth: pic,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => ColoredBox(color: _fg.withOpacity(0.13))),
+        ),
+      ),
+      Positioned(
+        left: 384,
+        top: 200,
+        width: 500,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text((item['Name'] ?? '').toString(), maxLines: 1, overflow: TextOverflow.ellipsis, style: _display(30)),
+          const SizedBox(height: 8),
+          StreamBuilder<Duration>(
+            stream: player.stream.position,
+            initialData: player.state.position,
+            builder: (_, snap) => Text(
+              [line, _endsAt(snap.data ?? Duration.zero)].where((x) => x.isNotEmpty).join(' · '),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: _body(21, color: _soft),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text((item['Overview'] ?? '').toString(),
+              maxLines: 4, overflow: TextOverflow.ellipsis, style: _body(21, color: _muted).copyWith(height: 1.45)),
+        ]),
+      ),
+      Positioned(
+        left: 940,
+        right: 56,
+        top: 196,
+        child: Column(children: [
+          for (final (name, value) in _details)
+            Container(
+              height: 46,
+              decoration: BoxDecoration(border: Border(bottom: BorderSide(color: _fg.withOpacity(0.08)))),
+              child: Row(children: [
+                SizedBox(width: 190, child: Text(name, style: _body(21, color: _muted))),
+                Expanded(
+                  child: Text(value.isEmpty ? '—' : value,
+                      maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(21, weight: FontWeight.w600)),
+                ),
+              ]),
+            ),
+          if (_details.isEmpty)
+            Align(alignment: Alignment.centerLeft, child: Text('Reading…', style: _body(21, color: _muted))),
+        ]),
+      ),
+    ];
+  }
+
+  // ---------- PC and TV: the loading screen ----------
+  //
+  // Like starting a game on PS5: the show's artwork full screen with its logo, the episode
+  // line, chips for how it plays, a running line and where it starts. It fades away once the
+  // video is on screen.
+  bool _loaded = false; // the video has started
+  bool _loadingGone = false; // the loading screen has faded out
+
+  void _checkLoaded() {
+    if (_loaded || !mounted) return;
+    if (player.state.duration > Duration.zero && !player.state.buffering) setState(() => _loaded = true);
+  }
+
+  static final _loadingShades = [
+    (
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+      colors: [_bg.withOpacity(0.85), _bg.withOpacity(0.35), _bg.withOpacity(0.10)],
+      stops: const [0.0, 0.55, 1.0]
+    ),
+    (
+      begin: Alignment.bottomCenter,
+      end: Alignment.topCenter,
+      colors: [_bg.withOpacity(0.85), _bg.withOpacity(0)],
+      stops: const [0.0, 0.5]
+    ),
+  ];
+
+  Widget _tvLoading() {
+    final item = widget.item;
+    final logo = widget.jf.logoFor(item);
+    final title = Text(titleOf(item), style: _display(84), maxLines: 1, overflow: TextOverflow.ellipsis);
+    final line = item['Type'] == 'Episode' ? episodeLine(item) : (item['ProductionYear']?.toString() ?? '');
+    final chips = _qualityLine(item).split(' · ').where((x) => x.trim().isNotEmpty).toList();
+    final art = sizeBucket(tvPx(1920)).clamp(1280, 2560);
+    final ticks = _resumeTicks;
+    final status = ticks <= 0 ? 'Starting' : 'Resumes at ${_clock(Duration(microseconds: ticks ~/ 10))}';
+    final now = DateTime.now();
+    final clock = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+    return Positioned.fill(
       child: IgnorePointer(
-        child: Frost(
-          radius: 14,
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
-          child: Text(_stats.isEmpty ? 'Reading…' : _stats, style: _body(17, color: _soft).copyWith(height: 1.6)),
+        ignoring: _loaded,
+        child: AnimatedOpacity(
+          opacity: _loaded ? 0 : 1,
+          duration: const Duration(milliseconds: 350),
+          onEnd: () {
+            if (_loaded && mounted) setState(() => _loadingGone = true);
+          },
+          child: ColoredBox(
+            color: _bg,
+            child: TvCanvas(
+              child: Stack(children: [
+                Positioned.fill(
+                  child: netImage(widget.jf.backdropFor(item, maxWidth: art),
+                      cacheWidth: art, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+                ),
+                for (final g in _loadingShades)
+                  Positioned.fill(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(begin: g.begin, end: g.end, colors: g.colors, stops: g.stops),
+                      ),
+                    ),
+                  ),
+                Positioned(right: 56, top: 48, child: Text(clock, style: _body(26, weight: FontWeight.w600, color: _soft))),
+                Positioned(
+                  left: 120,
+                  top: 430,
+                  width: 760,
+                  height: 150,
+                  child: logo == null
+                      ? Align(alignment: Alignment.bottomLeft, child: title)
+                      : LogoImage(
+                          url: logo,
+                          height: 150,
+                          cacheHeight: tvPx(150),
+                          alignment: Alignment.bottomLeft,
+                          fallback: Align(alignment: Alignment.bottomLeft, child: title)),
+                ),
+                if (line.isNotEmpty)
+                  Positioned(
+                    left: 120,
+                    top: 604,
+                    right: 120,
+                    child: Text(line, maxLines: 1, overflow: TextOverflow.ellipsis, style: _body(28, color: _soft)),
+                  ),
+                Positioned(
+                  left: 120,
+                  top: 660,
+                  child: Row(children: [
+                    for (final chip in chips)
+                      Container(
+                        height: 40,
+                        margin: const EdgeInsets.only(right: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(color: _fg.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+                        child: Text(chip, style: _body(19, weight: FontWeight.w600)),
+                      ),
+                  ]),
+                ),
+                Positioned(
+                  left: 120,
+                  top: 742,
+                  width: 420,
+                  height: 4,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(2),
+                    child: LinearProgressIndicator(backgroundColor: _fg.withOpacity(0.16), color: _fg),
+                  ),
+                ),
+                Positioned(left: 120, top: 764, child: Text(status, style: _body(21, color: _muted))),
+                // Cancel, bottom right (Back / Esc / Circle does the same).
+                Positioned(
+                  right: 56,
+                  bottom: 40,
+                  child: Focusable(
+                    onSelect: () => Navigator.of(context).maybePop(),
+                    builder: (f) => AnimatedContainer(
+                      duration: const Duration(milliseconds: 140),
+                      height: 52,
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: f ? _fg : _fg.withOpacity(0.10),
+                        borderRadius: BorderRadius.circular(26),
+                      ),
+                      child: Text('Cancel', style: _body(22, weight: FontWeight.w600, color: f ? _bg : _soft)),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ),
         ),
       ),
     );
@@ -2602,75 +3418,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       if (box != null) _subBox = box;
     });
     _applySubStyle(save: true);
-  }
-
-  // Size, position and background controls under the subtitle list. Changes show live.
-  List<Widget> _styleSection() {
-    Widget stepButton(IconData icon, VoidCallback onSelect, String label) => Focusable(
-          onSelect: onSelect,
-          builder: (f) => Tooltip(
-            message: label,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 120),
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: f ? _fg : _fg.withOpacity(0.12)),
-              child: Icon(icon, size: 24, color: f ? _bg : _fg),
-            ),
-          ),
-        );
-
-    Widget stepper(String name, String value, VoidCallback less, VoidCallback more, String lessLabel,
-            String moreLabel, IconData lessIcon, IconData moreIcon) =>
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-          child: Row(children: [
-            Expanded(child: Text(name, style: _body(20))),
-            stepButton(lessIcon, less, lessLabel),
-            SizedBox(
-              width: 76,
-              child: Text(value, textAlign: TextAlign.center, style: _body(19, weight: FontWeight.w600, color: _soft)),
-            ),
-            stepButton(moreIcon, more, moreLabel),
-          ]),
-        );
-
-    final heightAboveBottom = ((100 - _subPos) / 5).round();
-
-    return [
-      const SizedBox(height: 18),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
-        child: Text('Style', style: _body(16, weight: FontWeight.w700, color: _muted)),
-      ),
-      stepper('Size', '${(_subScale * 100).round()}%', () => _changeSubStyle(scale: _subScale - 0.1),
-          () => _changeSubStyle(scale: _subScale + 0.1), 'Smaller', 'Larger', Icons.remove_rounded, Icons.add_rounded),
-      stepper('Position', heightAboveBottom == 0 ? 'Bottom' : '+$heightAboveBottom',
-          () => _changeSubStyle(pos: _subPos + 5), () => _changeSubStyle(pos: _subPos - 5), 'Lower', 'Higher',
-          Icons.keyboard_arrow_down_rounded, Icons.keyboard_arrow_up_rounded),
-      Focusable(
-        onSelect: () => _changeSubStyle(box: !_subBox),
-        builder: (f) => AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          margin: const EdgeInsets.only(top: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          decoration: BoxDecoration(color: f ? _fg : Colors.transparent, borderRadius: BorderRadius.circular(12)),
-          child: Row(children: [
-            Expanded(child: Text('Background box', style: _body(20, color: f ? _bg : _fg))),
-            Text(_subBox ? 'On' : 'Off', style: _body(19, weight: FontWeight.w600, color: f ? _bg : _soft)),
-          ]),
-        ),
-      ),
-      Focusable(
-        onSelect: () => _changeSubStyle(scale: 1.0, pos: 100, box: false),
-        builder: (f) => AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          decoration: BoxDecoration(color: f ? _fg : Colors.transparent, borderRadius: BorderRadius.circular(12)),
-          child: Text('Reset style', style: _body(20, color: f ? _bg : _muted)),
-        ),
-      ),
-    ];
   }
 
   // Switch subtitles, and make sure mpv keeps drawing them after the switch.
@@ -2727,146 +3474,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   };
 
   String? _languageName(String? code) => code == null ? null : (_languages[code.toLowerCase()] ?? code);
-
-  Widget _trackPanel() {
-    final rows = <Widget>[];
-    var first = true;
-    void add(String label, bool selected, VoidCallback onSelect) {
-      void choose() {
-        onSelect();
-        _closePanel();
-      }
-
-      Widget look(bool f) => AnimatedContainer(
-          duration: const Duration(milliseconds: 120),
-          margin: const EdgeInsets.only(bottom: 6),
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-          decoration: BoxDecoration(
-            color: f ? _fg : Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Row(children: [
-            Expanded(
-              child: Text(label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: _body(20, weight: selected ? FontWeight.w700 : FontWeight.w500, color: f ? _bg : _fg)),
-            ),
-            if (selected) Icon(Icons.check_rounded, color: f ? _bg : _fg, size: 26),
-          ]),
-        );
-
-      rows.add(first
-          ? _NodeFocusable(node: _panelFirst, onSelect: choose, builder: look)
-          : Focusable(onSelect: choose, builder: look));
-      first = false;
-    }
-
-    if (_panel == _Panel.playback) {
-      // Original file or the server's version (see "Original file or the server's version").
-      add('Automatic', _mode == 'auto', () => _setMode('auto'));
-      add('Original file · best quality', _mode == 'original', () => _setMode('original'));
-      add('Converted by the server · smoothest', _mode == 'server', () => _setMode('server'));
-      rows.add(Padding(
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
-        child: Text(
-          _server
-              ? 'Now playing the version your server converts on the NAS.'
-              : 'Now playing the original file, straight from the NAS.',
-          style: _body(17, color: _muted).copyWith(height: 1.4),
-        ),
-      ));
-    } else if (_server && _panel == _Panel.audio) {
-      // The server's version: the file's own audio tracks; the server switches to the one picked.
-      final audio = _streams('Audio');
-      final current = _serverAudio ?? (audio.firstWhere((a) => a['IsDefault'] == true, orElse: () => null)?['Index']);
-      for (final a in audio) {
-        final index = (a['Index'] ?? -1) as int;
-        add(_streamLabel(a), index == current, () => _chooseServerAudio(index));
-      }
-    } else if (_server && _panel == _Panel.subtitles) {
-      add('Off', _serverSub == null && _serverTextSub == null, () => _chooseServerSubtitle(null));
-      for (final st in _streams('Subtitle')) {
-        final index = (st['Index'] ?? -1) as int;
-        final text = st['IsTextSubtitleStream'] == true;
-        add('${_streamLabel(st)}${text ? '' : ' · drawn in by the server'}',
-            index == _serverSub || index == _serverTextSub, () => _chooseServerSubtitle(st));
-      }
-      rows.addAll(_styleSection());
-    } else if (_panel == _Panel.audio) {
-      final current = player.state.track.audio;
-      for (final t in player.state.tracks.audio) {
-        if (t.id == 'no') continue;
-        add(_trackLabel(t.id, t.title, t.language, type: 'Audio'), t == current, () {
-          player.setAudioTrack(t);
-          _tracks.remember('audio', _describeAudio(t));
-        });
-      }
-    } else {
-      final current = player.state.track.subtitle;
-      for (final t in player.state.tracks.subtitle) {
-        add(_trackLabel(t.id, t.title, t.language, type: 'Subtitle'), t == current, () {
-          _setSubtitle(t);
-          if (t.id == 'no') {
-            _tracks.rememberSubsOff();
-          } else if (int.tryParse(t.id) != null) {
-            _tracks.remember('sub', _describeSub(t));
-          }
-        });
-      }
-      // Subtitles stored as separate files are not inside the video, so add them from Jellyfin.
-      final external = ((widget.item['MediaStreams'] as List?) ?? [])
-          .where((s) => s['Type'] == 'Subtitle' && s['IsExternal'] == true);
-      for (final s in external) {
-        add('${s['DisplayTitle'] ?? s['Language'] ?? 'Subtitle'} · separate file', false, () {
-          _setSubtitle(_externalTrack(s));
-          _tracks.remember('sub', TrackPrefs.describeStream(s));
-        });
-      }
-      rows.addAll(_styleSection());
-    }
-
-    return Positioned.fill(
-      child: Stack(children: [
-        // Clicking outside the panel closes it.
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: _closePanel,
-            child: Container(color: Colors.black.withOpacity(0.12)),
-          ),
-        ),
-        // A floating glass card, like the player's buttons.
-        Positioned(
-          top: 32,
-          bottom: 32,
-          right: 32,
-          width: 460,
-          child: Frost(
-            radius: 28,
-            padding: const EdgeInsets.fromLTRB(24, 32, 24, 20),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(
-                  _panel == _Panel.playback
-                      ? 'Playback'
-                      : _panel == _Panel.audio
-                          ? 'Audio'
-                          : 'Subtitles',
-                  style: _display(28)),
-              const SizedBox(height: 24),
-              // Its own focus scope: arrow keys stay inside the panel while it's open.
-              Expanded(
-                child: FocusScope(
-                  child: rows.isEmpty
-                      ? Text('None in this file.', style: _body(20, color: _muted))
-                      : ListView(children: rows),
-                ),
-              ),
-            ]),
-          ),
-        ),
-      ]),
-    );
-  }
 }
 
 // A round button that can also take a focus node from outside (used to focus Play/Pause).
@@ -2942,7 +3549,13 @@ class _ProgressBar extends StatefulWidget {
 class _ProgressBarState extends State<_ProgressBar> {
   bool _focused = false;
   bool _hover = false;
+  double? _hoverX; // where the pointer is over the bar, for the time pill above it
   double? _dragFraction;
+
+  static String _time(Duration d) {
+    final h = d.inHours, m = d.inMinutes % 60, s = d.inSeconds % 60;
+    return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}' : '$m:${s.toString().padLeft(2, '0')}';
+  }
 
   double _fraction(Duration d) {
     final total = widget.duration.inMilliseconds;
@@ -2977,7 +3590,11 @@ class _ProgressBarState extends State<_ProgressBar> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
+        onExit: (_) => setState(() {
+          _hover = false;
+          _hoverX = null;
+        }),
+        onHover: (e) => setState(() => _hoverX = e.localPosition.dx),
         child: LayoutBuilder(builder: (context, box) {
           double toFraction(double dx) => (dx / box.maxWidth).clamp(0.0, 1.0);
           return GestureDetector(
@@ -2994,9 +3611,9 @@ class _ProgressBarState extends State<_ProgressBar> {
               child: Stack(alignment: Alignment.centerLeft, clipBehavior: Clip.none, children: [
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 140),
-                  height: active ? 8 : 5,
+                  height: active ? 10 : 6,
                   decoration: BoxDecoration(
-                    color: _fg.withOpacity(0.2),
+                    color: _fg.withOpacity(0.18),
                     borderRadius: BorderRadius.circular(8),
                   ),
                 ),
@@ -3004,7 +3621,7 @@ class _ProgressBarState extends State<_ProgressBar> {
                   widthFactor: buffered,
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 140),
-                    height: active ? 8 : 5,
+                    height: active ? 10 : 6,
                     decoration: BoxDecoration(
                       color: _fg.withOpacity(0.35),
                       borderRadius: BorderRadius.circular(8),
@@ -3015,10 +3632,25 @@ class _ProgressBarState extends State<_ProgressBar> {
                   widthFactor: played,
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 140),
-                    height: active ? 8 : 5,
+                    height: active ? 10 : 6,
                     decoration: BoxDecoration(color: _fg, borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
+                // Hovering: a little pill with the time under the pointer.
+                if (_hoverX != null && widget.duration > Duration.zero && _dragFraction == null)
+                  Positioned(
+                    left: (_hoverX!.clamp(0.0, box.maxWidth) - 50).clamp(-20.0, box.maxWidth - 80),
+                    top: -44,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 100,
+                        height: 38,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(color: const Color(0xFF1A1E25), borderRadius: BorderRadius.circular(19)),
+                        child: Text(_time(_at(toFraction(_hoverX!))), style: _body(20, weight: FontWeight.w700)),
+                      ),
+                    ),
+                  ),
                 // Handle, shown when the bar is selected, hovered or dragged.
                 Positioned(
                   left: played * box.maxWidth - 11,
