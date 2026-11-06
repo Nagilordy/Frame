@@ -77,6 +77,32 @@ jobs:
           PY
           grep -n "rgba\|background_color\|frame_clear" linux/runner/my_application.cc || true
 
+      # The new player's engine draws into a window inside Frame from its own threads. Xlib
+      # (X11) then has to be in its thread-safe mode, switched on before anything else uses it,
+      # or the app aborts ("[xcb] Unknown sequence number"). Harmless under Wayland.
+      - name: Thread-safe X11 (for the new player)
+        run: |
+          python3 - <<'PY'
+          p = 'linux/runner/main.cc'
+          s = open(p).read()
+          if 'XInitThreads' not in s:
+              s = '#include <X11/Xlib.h>\n' + s
+              s = s.replace('int main(int argc, char** argv) {',
+                            'int main(int argc, char** argv) {\n  XInitThreads();', 1)
+              open(p, 'w').write(s)
+          print(open(p).read())
+          for p in ['linux/runner/CMakeLists.txt', 'linux/CMakeLists.txt']:
+              try:
+                  s = open(p).read()
+              except FileNotFoundError:
+                  continue
+              if 'PkgConfig::GTK)' in s and 'X11)' not in s:
+                  s = s.replace('PkgConfig::GTK)', 'PkgConfig::GTK X11)', 1)
+                  open(p, 'w').write(s)
+                  print('linked X11 in', p)
+                  break
+          PY
+
       - name: Build
         # SENTRY_DSN (a repository secret) turns on crash reports; empty = off.
         run: flutter build linux --release --dart-define=FRAME_BUILD=${GITHUB_SHA::7} --dart-define=SENTRY_DSN=${{ secrets.SENTRY_DSN }}
