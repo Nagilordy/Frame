@@ -27,4 +27,13 @@ void main() {
     expect(sdr.args, ['--fs']);
     expect(sdr.env, isEmpty);
   });
+  test('Gaming Mode plays inside Frame\'s window', () {
+    expect(useInAppPlayer(mpvFound: true, gamingMode: true), isTrue);
+    expect(useInAppPlayer(mpvFound: true, gamingMode: true, env: {'FRAME_SEPARATE_PLAYER': '1'}), isFalse);
+  });
+  test('the desktop keeps the mpv window, unless mpv is missing', () {
+    expect(useInAppPlayer(mpvFound: true, gamingMode: false), isFalse);
+    expect(useInAppPlayer(mpvFound: false, gamingMode: false), isTrue);
+    expect(useInAppPlayer(mpvFound: false, gamingMode: true, env: {'FRAME_SEPARATE_PLAYER': '1'}), isTrue);
+  });
 }

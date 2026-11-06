@@ -2,8 +2,11 @@
 //
 // In Gaming Mode, Steam runs every app inside Gamescope: one app at a time, full screen, with
 // Steam's own controller handling, overlay and HDR. Frame notices and adjusts:
-// - Frame opens full screen (there are no windows to move around), and steps aside (hides)
-//   while the player is open, because Gamescope only shows one window.
+// - Frame opens full screen (there are no windows to move around).
+// - Videos play inside Frame's own window (the in-app player), not in a separate mpv window:
+//   Gamescope shows one window at a time, so a second window can leave the video hidden or the
+//   controller talking to the wrong window. (FRAME_SEPARATE_PLAYER=1 brings the mpv window back
+//   for testing; Frame then steps aside while it plays.)
 // - The player (mpv) always opens full screen, drawn with Vulkan, so Gamescope can show it in
 //   real HDR on an HDR TV.
 // Desktop Mode, other Linux desktops, Windows and phones are unchanged.
@@ -36,3 +39,11 @@ final bool inGamingMode = Platform.isLinux && isGamingModeEnvironment(Platform.e
       // (ENABLE_HDR_WSI is for KDE's HDR layer and can break the player outside Gamescope).
       env: const <String, String>{},
     );
+
+/// Whether videos play inside Frame's window (the in-app player) instead of a separate mpv
+/// window: always in Gaming Mode (one window at a time there), and whenever mpv isn't found.
+bool useInAppPlayer({required bool mpvFound, required bool gamingMode, Map<String, String> env = const {}}) {
+  if (!mpvFound) return true;
+  if (gamingMode) return env['FRAME_SEPARATE_PLAYER'] != '1';
+  return false;
+}

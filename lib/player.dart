@@ -25,6 +25,7 @@ import 'perf.dart' show perfLog;
 import 'tracks.dart';
 import 'phone.dart';
 import 'playback_rules.dart';
+import 'gaming_mode.dart' show inGamingMode;
 import 'crash_reports.dart' show reportProblem;
 import 'downloads.dart' show Downloads;
 
@@ -970,7 +971,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     // Disc images and disc folders (ISO, Blu-ray, DVD) can't be streamed as one file.
     final item = widget.item;
     final local = Downloads.instance.localFile(_id) != null; // downloaded: always the file here
-    final wantServer = startWithServer(item: item, downloaded: local, mode: _mode, phone: _phone, level: _level);
+    // Phones, and Gaming Mode on SteamOS, can't fix Dolby Vision 5's colours in this player the
+    // way the PC's mpv window does: on Automatic they use the server's version for those files.
+    final wantServer =
+        startWithServer(item: item, downloaded: local, mode: _mode, phone: _phone || inGamingMode, level: _level);
     if (wantServer && _phone && _isDolbyVisionOnly && _mode == 'auto') {
       debugPrint('Player: Dolby Vision Profile 5 on a phone: using the server\'s version');
     }

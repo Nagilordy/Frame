@@ -5,6 +5,11 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
+- **SteamOS Gaming Mode: videos play inside Frame's window.** Gaming Mode shows one window at a
+  time, so the separate player window could leave the video hidden or the controller in the
+  wrong place. In Gaming Mode Frame now uses its in-app player. On Automatic, Dolby Vision 5 files
+  use the server's version there (like on phones). Desktop Mode, Windows and other Linux desktops
+  keep the separate player window with real HDR.
 - **Windows: Frame's icon and name everywhere.** The program is now Frame.exe (not
   player_test.exe), with Frame's name in Task Manager and the window from the first moment.
   Desktop and Start menu shortcuts use Frame's icon file directly (so an old cached icon can't

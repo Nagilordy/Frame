@@ -239,10 +239,11 @@ Widget playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlist
   return _playerScreen(jf, item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
 }
 
+// In SteamOS Gaming Mode videos play inside Frame's window (see gaming_mode.dart).
 Widget _playerScreen(Jellyfin jf, dynamic item, {SyncPlay? sync, String? playlistItemId, int? startTicks}) =>
-    _mpvPath != null
-        ? NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
-        : PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
+    useInAppPlayer(mpvFound: _mpvPath != null, gamingMode: inGamingMode, env: Platform.environment)
+        ? PlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks)
+        : NativePlayerScreen(jf: jf, item: item, sync: sync, playlistItemId: playlistItemId, startTicks: startTicks);
 
 // ---------- Talking to mpv ----------
 
