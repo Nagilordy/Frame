@@ -1,4 +1,4 @@
-// Frame's own player, drawing straight to the screen (preview, Windows and Linux).
+// Frame's own player, drawing straight to the screen (Windows and Linux).
 //
 // The goal: everything the separate mpv window does (real HDR, Dolby Vision, 4K, smooth
 // motion), but inside Frame's window, with Frame's own controls, so the mpv program can go.
@@ -8,47 +8,31 @@
 // (packages/frame_video). Frame's window turns see-through while the video plays, and this
 // screen draws only the controls, on top. One app, one window.
 //
-// Linux: the surface needs Frame running in X11 mode. Turning the preview on there also tells
-// the AppImage to start Frame in X11 mode next time (a small file, see packaging/AppRun), so it
-// works after a restart; SteamOS Gaming Mode is always X11.
+// Linux: the surface needs Frame running in X11 mode; the AppImage always starts it that way.
 //
-// Preview: off by default; F9 turns it on or off (saved). Original file only, no Watch
-// together yet: those fall back to the usual player. The info line at the bottom shows what
-// the engine is doing (renderer, decoder, HDR or not) so tests can tell it works.
+// It's the player on Windows and Linux (no switch). Original files for now; Watch together and
+// the server's version still use the older player until they're brought over. The info pill
+// shows what the engine is doing (renderer, decoder, HDR or not) so tests can tell it works.
 
 import 'dart:async';
-import 'dart:io' show File, Platform;
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:frame_video/frame_video.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'main.dart' show Jellyfin;
 import 'player.dart' show PlayerScreen;
 import 'ui.dart';
 
-/// The preview switch (F9), remembered between launches.
-final ValueNotifier<bool> newPlayerPreview = ValueNotifier(false);
+/// Frame's own player is THE player on Windows and Linux (no switch). FRAME_OLD_PLAYER=1, set
+/// before starting Frame, brings back the old mpv window: an emergency way out while the new
+/// player is young, not an option in the app.
+final bool newPlayerOn = (Platform.environment['FRAME_OLD_PLAYER'] ?? '') != '1';
 
-Future<void> loadNewPlayerPreview() async {
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    newPlayerPreview.value = prefs.getBool('newPlayerPreview') ?? false;
-  } catch (_) {}
-}
-
-Future<void> toggleNewPlayerPreview() async {
-  newPlayerPreview.value = !newPlayerPreview.value;
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('newPlayerPreview', newPlayerPreview.value);
-  } catch (_) {}
-  if (Platform.isLinux) await _setX11Mode(newPlayerPreview.value);
-}
-
-/// Linux: whether Frame is running in X11 mode right now (needed for the surface).
+/// Linux: whether Frame is running in X11 mode right now (needed for the surface; the AppImage
+/// always starts Frame that way, see packaging/AppRun).
 bool get runningInX11 {
   final env = Platform.environment;
   final backend = env['GDK_BACKEND'] ?? '';
@@ -56,35 +40,6 @@ bool get runningInX11 {
   if (backend.startsWith('wayland')) return false;
   return (env['WAYLAND_DISPLAY'] ?? '').isEmpty && (env['DISPLAY'] ?? '').isNotEmpty;
 }
-
-/// The note the AppImage looks for to start Frame in X11 mode.
-File _x11ModeFile() {
-  final env = Platform.environment;
-  final config = env['XDG_CONFIG_HOME']?.isNotEmpty == true ? env['XDG_CONFIG_HOME']! : '${env['HOME']}/.config';
-  return File('$config/frame/x11-mode');
-}
-
-Future<void> _setX11Mode(bool on) async {
-  try {
-    final f = _x11ModeFile();
-    if (on) {
-      await f.parent.create(recursive: true);
-      await f.writeAsString('Start Frame in X11 mode (for the new player preview). Delete to go back.\n');
-    } else if (await f.exists()) {
-      await f.delete();
-    }
-  } catch (_) {}
-}
-
-/// What the F9 banner says.
-String newPlayerPreviewMessage() {
-  if (!newPlayerPreview.value) return "Frame's new player is off";
-  if (Platform.isLinux && !runningInX11) return "Frame's new player is on: restart Frame to use it";
-  return "Frame's new player is on";
-}
-
-/// Whether this video can use the preview player.
-bool canUseSurfacePlayer({required bool inParty}) => FrameVideo.supported && newPlayerPreview.value && !inParty;
 
 class SurfacePlayerScreen extends StatefulWidget {
   const SurfacePlayerScreen({super.key, required this.jf, required this.item, this.startTicks});
@@ -394,7 +349,7 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
                               style: const TextStyle(fontFamily: 'monospace', fontSize: 18, height: 1.35, color: kMuted)),
                         ],
                         const SizedBox(height: 20),
-                        Text('Press Back to go back. F9 turns the new player off.', style: tvBody(22, color: kMuted)),
+                        Text('Press Back to go back.', style: tvBody(22, color: kMuted)),
                       ]),
                     ),
                   ),
@@ -494,7 +449,7 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                   decoration: BoxDecoration(color: kFg.withOpacity(0.12), borderRadius: BorderRadius.circular(18)),
-                                  child: Text('Preview player${_engine.isEmpty ? '' : ' · $_engine'}',
+                                  child: Text('Frame player${_engine.isEmpty ? '' : ' · $_engine'}',
                                       style: tvBody(19, weight: FontWeight.w600, color: kSoft)),
                                 ),
                               ]),
@@ -524,22 +479,21 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
       );
 }
 
-/// Why the preview player wasn't used for the last video (shown once, so a test can tell),
-/// or null when it was used or is off.
+/// Set when Frame's player couldn't be used at all on this system (shown once as a banner).
 final ValueNotifier<String?> surfacePlayerSkipped = ValueNotifier(null);
 
-/// Used by playerScreen: the preview player for this video, when it applies.
+/// Used by playerScreen: Frame's own player for this video. For now Watch together and the
+/// server's version still go through the older player (until they're brought over), and so
+/// does any system where the video area can't be created.
 Widget? surfacePlayerFor(Jellyfin jf, dynamic item, {required bool inParty, int? startTicks}) {
-  if (!FrameVideo.supported || !newPlayerPreview.value) return null;
-  String? why;
+  if (!FrameVideo.supported || !newPlayerOn) return null;
   if (inParty) {
-    why = 'Watch together uses the usual player for now';
-  } else if (Platform.isLinux && !runningInX11) {
-    why = 'it needs X11 mode: restart Frame (Frame is in ${Platform.environment['GDK_BACKEND'] ?? 'Wayland'} mode)';
+    debugPrint('Surface player: Watch together uses the older player for now');
+    return null;
   }
-  if (why != null) {
-    debugPrint('Surface player: not used, $why');
-    surfacePlayerSkipped.value = why;
+  if (Platform.isLinux && !runningInX11) {
+    debugPrint('Surface player: Frame is not in X11 mode (GDK_BACKEND=${Platform.environment['GDK_BACKEND']})');
+    surfacePlayerSkipped.value = 'Frame needs to start in X11 mode for its player';
     return null;
   }
   return SurfacePlayerScreen(jf: jf, item: item, startTicks: startTicks);

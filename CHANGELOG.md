@@ -5,12 +5,12 @@ What changed in each version of Frame. Newest first.
 ## 0.3 (in testing)
 
 ### New
-- **Preview: Frame's own player with real HDR (Windows and Linux).** Press F9 to try it (on
-  Linux, then restart Frame: it needs X11 mode, which the AppImage switches to by itself). The video engine
-  draws straight to the screen with mpv's best renderer (HDR, Dolby Vision, 4K, smooth motion),
-  under Frame's window, and Frame draws its own controls on top: one window, no separate mpv
-  program. Original files only for now (Watch together and the server's version use the usual
-  player). The info pill shows the renderer, decoder and whether the picture is HDR.
+- **Frame's own player is the player on Windows and Linux** (no switch). The video engine draws
+  straight to the screen with mpv's best renderer (HDR, Dolby Vision, 4K, smooth motion) under
+  Frame's window, and Frame draws its own controls on top: one window, no separate mpv program.
+  On Linux Frame always starts in X11 mode for it. Original files for now: Watch together and
+  the server's version still use the older player until they're brought over. FRAME_OLD_PLAYER=1
+  brings back the old mpv window in an emergency.
 - **SteamOS Gaming Mode: videos play inside Frame's window.** Gaming Mode shows one window at a
   time, so the separate player window could leave the video hidden or the controller in the
   wrong place. In Gaming Mode Frame now uses its in-app player. On Automatic, Dolby Vision 5 files
