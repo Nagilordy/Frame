@@ -115,6 +115,8 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
   bool _playing = false;
   bool _buffering = true;
   bool _started = false;
+  bool _played = false; // got past the first second
+  final List<String> _log = []; // the engine's last few messages
   bool _closing = false;
   Duration _pos = Duration.zero, _dur = Duration.zero;
   double? _drag; // 0..1 while dragging the timeline
@@ -186,6 +188,7 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
 
     _subs.addAll([
       _player.stream.position.listen((p) {
+        if (p > const Duration(seconds: 1)) _played = true;
         if (_drag == null && mounted) setState(() => _pos = p);
       }),
       _player.stream.duration.listen((d) {
@@ -200,12 +203,28 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
       _player.stream.buffering.listen((b) {
         if (mounted) setState(() => _buffering = b);
       }),
+      // The end of the video closes the player, but only once it has really played: if it
+      // stops before showing anything, the player stays open and says what went wrong
+      // (instead of closing straight away with no explanation).
       _player.stream.completed.listen((done) {
-        if (done) _close();
+        if (!done) return;
+        if (_played) {
+          _close();
+        } else if (mounted && _error == null) {
+          setState(() => _error = 'The video stopped before it started.');
+        }
       }),
       _player.stream.error.listen((e) {
         debugPrint('Surface player: $e');
-        if (!_started && mounted) setState(() => _error = e);
+        if (!_played && mounted) setState(() => _error = e);
+      }),
+      // What the engine says (warnings and errors), printed to the terminal and kept for the
+      // error box.
+      _player.stream.log.listen((l) {
+        final line = '[${l.level}] ${l.prefix}: ${l.text.trim()}';
+        debugPrint('Surface player mpv: $line');
+        _log.add(line);
+        if (_log.length > 6) _log.removeAt(0);
       }),
       _player.stream.videoParams.listen((_) => _readEngine()),
     ]);
@@ -362,11 +381,21 @@ class _SurfacePlayerScreenState extends State<SurfacePlayerScreen> {
                 if (_error != null)
                   Center(
                     child: Container(
-                      width: 900,
+                      width: 1200,
                       padding: const EdgeInsets.all(40),
                       decoration: BoxDecoration(color: const Color(0xF212151B), borderRadius: BorderRadius.circular(28)),
-                      child: Text("This video couldn't play here.\n$_error",
-                          textAlign: TextAlign.center, style: tvBody(26, color: kSoft)),
+                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text("The new player couldn't play this video", style: tvDisplay(32)),
+                        const SizedBox(height: 12),
+                        Text('$_error', style: tvBody(24, color: kSoft)),
+                        if (_log.isNotEmpty) ...[
+                          const SizedBox(height: 16),
+                          Text(_log.join('\n'),
+                              style: const TextStyle(fontFamily: 'monospace', fontSize: 18, height: 1.35, color: kMuted)),
+                        ],
+                        const SizedBox(height: 20),
+                        Text('Press Back to go back. F9 turns the new player off.', style: tvBody(22, color: kMuted)),
+                      ]),
                     ),
                   ),
                 if (_buffering && _error == null)
