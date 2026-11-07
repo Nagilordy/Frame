@@ -1197,6 +1197,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     for (final n in _tabFocus) {
       n.dispose();
     }
+    _cardsScroll.dispose();
+    _cardsEdges.dispose();
     super.dispose();
   }
 
@@ -2966,20 +2968,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                                   p == _Panel.audio ? 'This video has no sound tracks.' : 'Nothing to choose here.',
                                   style: _body(24, color: _muted)),
                             )
-                          // Up goes back to this sheet's own tab (moving onto another tab
-                          // would switch to it).
-                          : FocusLinks(
-                              up: () => focusOn(_tabFocus[_tvTabs.indexOf(_panel)]),
-                              child: ListView.separated(
-                              scrollDirection: Axis.horizontal,
-                              padding: const EdgeInsets.symmetric(horizontal: 56, vertical: 12),
-                              clipBehavior: Clip.none,
-                              cacheExtent: 4000, // every card exists, so the chosen one can be selected
-                              itemCount: choices.length,
-                              separatorBuilder: (_, __) => const SizedBox(width: 24),
-                              itemBuilder: (_, i) => _tvCard(choices[i], i == focusIdx ? _panelFirst : null),
-                            ),
-                            ),
+                          : _tvCardRow(choices, focusIdx),
                     ),
                     if (p == _Panel.playback)
                       Positioned(
@@ -3046,6 +3035,117 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
+  // The row of cards. The controller and keyboard scroll it by moving onto a card; with a
+  // mouse, the wheel or a touchpad scrolls it sideways, and arrows at an edge (where there are
+  // more cards that way) scroll it by a few cards. The row fades at those edges.
+  final _cardsScroll = ScrollController();
+  final _cardsEdges = ValueNotifier<(bool, bool)>((false, false)); // more to the left, to the right
+
+  void _cardsMoved(ScrollMetrics m) {
+    final edges = (m.pixels > m.minScrollExtent + 1, m.pixels < m.maxScrollExtent - 1);
+    if (_cardsEdges.value != edges) _cardsEdges.value = edges;
+  }
+
+  void _scrollCards(double by, {bool animate = true}) {
+    if (!_cardsScroll.hasClients) return;
+    final pos = _cardsScroll.position;
+    final to = (pos.pixels + by).clamp(pos.minScrollExtent, pos.maxScrollExtent);
+    if (animate) {
+      _cardsScroll.animateTo(to, duration: const Duration(milliseconds: 260), curve: Curves.easeOutCubic);
+    } else {
+      _cardsScroll.jumpTo(to);
+    }
+  }
+
+  Widget _tvCardRow(List<({String label, String note, bool selected, VoidCallback onSelect})> choices, int focusIdx) {
+    final list = ListView.separated(
+      controller: _cardsScroll,
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 56, vertical: 12),
+      clipBehavior: Clip.none,
+      cacheExtent: 4000, // every card exists, so the chosen one can be selected
+      itemCount: choices.length,
+      separatorBuilder: (_, __) => const SizedBox(width: 24),
+      itemBuilder: (_, i) => _tvCard(choices[i], i == focusIdx ? _panelFirst : null),
+    );
+    Widget arrow(bool left) => Positioned(
+          left: left ? 16 : null,
+          right: left ? null : 16,
+          top: 0,
+          bottom: 0,
+          child: Center(
+            child: MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: () => _scrollCards(left ? -648 : 648), // about two cards
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: const Color(0xF21A1E25),
+                    border: Border.all(color: _fg.withOpacity(0.14)),
+                    boxShadow: const [BoxShadow(color: Color(0x66000000), blurRadius: 16, offset: Offset(0, 6))],
+                  ),
+                  child: Icon(left ? Icons.chevron_left_rounded : Icons.chevron_right_rounded, size: 34, color: _fg),
+                ),
+              ),
+            ),
+          ),
+        );
+    // Up goes back to this sheet's own tab (moving onto another tab would switch to it).
+    return FocusLinks(
+      up: () => focusOn(_tabFocus[_tvTabs.indexOf(_panel)]),
+      child: Listener(
+        // A mouse wheel only scrolls up and down; here that moves the row sideways.
+        onPointerSignal: (e) {
+          if (e is! PointerScrollEvent) return;
+          final d = e.scrollDelta.dy;
+          if (d == 0 || e.scrollDelta.dx != 0) return; // sideways swipes scroll the row by themselves
+          GestureBinding.instance.pointerSignalResolver.register(e, (_) => _scrollCards(d * 2, animate: false));
+        },
+        child: NotificationListener<ScrollMetricsNotification>(
+          onNotification: (n) {
+            _cardsMoved(n.metrics);
+            return false;
+          },
+          child: NotificationListener<ScrollUpdateNotification>(
+            onNotification: (n) {
+              _cardsMoved(n.metrics);
+              return false;
+            },
+            child: ValueListenableBuilder<(bool, bool)>(
+              valueListenable: _cardsEdges,
+              child: list,
+              builder: (_, edges, list) {
+                final (moreLeft, moreRight) = edges;
+                return Stack(clipBehavior: Clip.none, children: [
+                  Positioned.fill(
+                    child: ShaderMask(
+                      blendMode: BlendMode.dstIn,
+                      shaderCallback: (r) => LinearGradient(
+                        colors: [
+                          moreLeft ? const Color(0x00000000) : const Color(0xFF000000),
+                          const Color(0xFF000000),
+                          const Color(0xFF000000),
+                          moreRight ? const Color(0x00000000) : const Color(0xFF000000),
+                        ],
+                        stops: const [0, 0.06, 0.94, 1],
+                      ).createShader(r),
+                      child: list,
+                    ),
+                  ),
+                  if (moreLeft) arrow(true),
+                  if (moreRight) arrow(false),
+                ]);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   // A tab along the top of the open sheet. Moving onto it with the controller switches to it.
   Widget _tvSheetTab(int i) {
     final p = _tvTabs[i];
@@ -3075,6 +3175,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
   void _switchTab(_Panel p) {
     if (_panel == p || !mounted) return;
+    if (_cardsScroll.hasClients) _cardsScroll.jumpTo(0);
     setState(() => _panel = p);
     _statsTimer?.cancel();
     if (p == _Panel.info) {
